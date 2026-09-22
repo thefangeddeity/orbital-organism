@@ -276,6 +276,7 @@ class NeuralLearner(Lego):
         try:
             data = self._read_json(self.self_program_path)
             self.evolution_runs = int(data.get("accepted", 0))
+            self.evolution_success_rate = float(data.get("success_rate", 0.0))
             self._replay_accepted_variants(data.get("commands", []))
         except Exception:
             pass

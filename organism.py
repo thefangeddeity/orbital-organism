@@ -168,13 +168,30 @@ def main():
     fig = plt.figure(figsize=(16, 9))
     fig.patch.set_facecolor("black")
 
-    # Three regions, explicitly positioned in figure-fraction coordinates
-    # rather than via subplots_adjust: left ~0-0.19 is the text dashboard
-    # (fig.text, no axes needed), middle is the 3-D world, right is the
-    # per-worker fleet panel (Tanzania today; Tina/Ariana can each get
-    # their own strip the same way once they're real).
-    ax = fig.add_axes([0.21, 0.05, 0.56, 0.88], projection="3d")
-    tanzania_ax = fig.add_axes([0.80, 0.05, 0.18, 0.88])
+    # Shared layout system: every panel uses the same top/bottom bounds
+    # and the same framed-black-box-with-phosphor-border treatment, so
+    # the window reads as one composed design instead of three
+    # independently-styled boxes (dashboard used to be a bare fig.text()
+    # with matplotlib's default bbox -- an opaque steel-blue rectangle
+    # that matched nothing else in the window).
+    PANEL_BOTTOM = 0.05
+    PANEL_TOP = 0.93
+    PANEL_HEIGHT = PANEL_TOP - PANEL_BOTTOM
+
+    dashboard_ax = fig.add_axes([0.015, PANEL_BOTTOM, 0.185, PANEL_HEIGHT])
+    ax = fig.add_axes([0.21, PANEL_BOTTOM, 0.56, PANEL_HEIGHT], projection="3d")
+    tanzania_ax = fig.add_axes([0.80, PANEL_BOTTOM, 0.18, PANEL_HEIGHT])
+
+    PHOSPHOR = (0.0, 1.0, 0.45)
+
+    def _style_2d_panel(panel_ax):
+        panel_ax.set_facecolor("black")
+        for spine in panel_ax.spines.values():
+            spine.set_color((*PHOSPHOR, 0.2))
+        panel_ax.set_xticks([])
+        panel_ax.set_yticks([])
+        panel_ax.set_xlim(0, 1)
+        panel_ax.set_ylim(0, 1)
 
     # Persistent visual trails belong to the renderer, not the simulator.
     render_trails = {
@@ -260,8 +277,6 @@ def main():
         "Uranus": "#9FE3F0",
         "Neptune": "#3D5FE0",
     }
-
-    PHOSPHOR = (0.0, 1.0, 0.45)
 
     def _apply_dark_theme(ax):
         # ax.clear() resets these every frame, so this must be re-applied
@@ -367,18 +382,14 @@ def main():
 
     def _render_tanzania_panel():
         tanzania_ax.clear()
-        tanzania_ax.set_facecolor("black")
-
-        for spine in tanzania_ax.spines.values():
-            spine.set_color((*PHOSPHOR, 0.2))
-
-        tanzania_ax.set_xticks([])
-        tanzania_ax.set_yticks([])
-        tanzania_ax.set_xlim(0, 1)
-        tanzania_ax.set_ylim(0, 1)
+        _style_2d_panel(tanzania_ax)
 
         online = tanzania_provider.available()
-        status_color = (0.0, 1.0, 0.3) if online else (0.55, 0.15, 0.15)
+        # Both states now use the same alpha the rest of the panel's
+        # phosphor elements use (0.85-0.9), instead of the status dot
+        # being the one fully-opaque element in an otherwise
+        # alpha-blended system.
+        status_color = (*PHOSPHOR, 0.9) if online else (0.8, 0.25, 0.25, 0.85)
 
         # A Circle patch draws in data coordinates -- on this panel's
         # tall, narrow (non-square) axes that renders as a stretched
@@ -462,14 +473,26 @@ def main():
                 hi = max(log_scored.values())
                 span = (hi - lo) or 1.0
 
+                # Enlarged from the first pass (cell_h 0.032 -> 0.06):
+                # the grid was floating in a mostly-empty lower panel
+                # with no relationship to the resource bar below it.
+                # Bigger cells give it real visual weight as the
+                # panel's centerpiece instead of reading as an
+                # afterthought.
                 grid_top = 0.53
                 grid_left = 0.06
                 cell_w = 0.88 / len(LOSS_ORDER)
-                cell_h = 0.032
-                gap = 0.006
+                cell_h = 0.06
+                gap = 0.008
+
+                # Worst-to-best interpolates within the phosphor family
+                # (dim red -> full phosphor green) instead of arbitrary
+                # RGB math, so this grid reads as the same visual
+                # system as the status dot and everything else here.
+                GRID_WORST = (0.75, 0.2, 0.2)
 
                 tanzania_ax.text(
-                    grid_left, grid_top + 0.03, "LAST SWEEP",
+                    grid_left, grid_top + 0.035, "LAST SWEEP",
                     color=PHOSPHOR, fontsize=6.5, family="monospace",
                     alpha=0.55,
                 )
@@ -483,12 +506,10 @@ def main():
                         if key in log_scored:
                             # Rank within [0, 1]: 0 = worst, 1 = best.
                             rank = 1.0 - (log_scored[key] - lo) / span
-                            color = (
-                                0.85 - 0.7 * rank,
-                                0.15 + 0.85 * rank,
-                                0.25,
-                                0.85,
-                            )
+                            color = tuple(
+                                GRID_WORST[i] + (PHOSPHOR[i] - GRID_WORST[i]) * rank
+                                for i in range(3)
+                            ) + (0.85,)
                         else:
                             color = (0.3, 0.3, 0.3, 0.25)
 
@@ -508,7 +529,7 @@ def main():
                         alpha=0.5, ha="center", va="top", rotation=30,
                     )
 
-        bar_y = 0.10
+        bar_y = 0.15
         tanzania_ax.add_patch(
             Rectangle(
                 (0.06, bar_y), 0.88, 0.035,
@@ -904,29 +925,47 @@ def main():
 
             age_seconds = now - organism_born
 
-            lines = [
-                "ORGANISM",
-                "",
-                f"age: {_format_age(age_seconds)}",
-                "architecture: MODULAR",
-                f"learning: {learning_state}",
-                "",
-                "ACTIVE LEGOS",
-            ]
+            dashboard_ax.clear()
+            _style_2d_panel(dashboard_ax)
 
-            for name in registry.active():
-                lines.append(
-                    f"  {name}"
-                )
+            dashboard_ax.text(
+                0.05, 0.96, "ORGANISM",
+                color=PHOSPHOR, fontsize=10, family="monospace",
+                weight="bold", va="center",
+            )
+            dashboard_ax.text(
+                0.05, 0.93, f"age {_format_age(age_seconds)} · {learning_state}",
+                color=PHOSPHOR, fontsize=6.5, family="monospace",
+                va="center", alpha=0.55,
+            )
 
-            lines.extend([
-                "",
-                "COMPUTATION",
-            ])
+            # The real signal -- is it learning, is it improving --
+            # comes first. Static facts that never change for the life
+            # of the process (module list, architecture tagline) are
+            # collapsed to one line each and pushed to the bottom
+            # instead of delaying the numbers that actually move.
+            lines = ["LEARNING"]
 
-            for provider_name, provider in providers.items():
-                status = "available" if provider.available() else "disabled"
-                lines.append(f"  {provider_name}: {status}")
+            if learner is not None:
+                lines.extend([
+                    (
+                        f"  validation: {learner.validation_loss:.3e}"
+                    ),
+                    (
+                        f"  best: {learner.best_loss:.3e}"
+                    ),
+                    (
+                        f"  successes: {learner.evolution_runs}  "
+                        f"rate: {learner.evolution_success_rate:.1%}"
+                    ),
+                    f"  steps: {learner.training_steps:,}",
+                    f"  loss_fn: {learner.active_loss_variant}",
+                    f"  features: {learner.active_feature_variant}",
+                    f"  activation: {learner.active_activation_variant}",
+                    f"  width: {learner.hidden_width}",
+                ])
+            else:
+                lines.append("  engine: disabled")
 
             budget_state = budget.state()
 
@@ -958,59 +997,8 @@ def main():
 
             lines.extend([
                 "",
-                "LEARNING",
-            ])
-
-            if learner is not None:
-
-                lines.extend([
-                    "  engine: CPU neural network",
-                    (
-                        f"  steps: "
-                        f"{learner.training_steps:,}"
-                    ),
-                    (
-                        f"  validation: "
-                        f"{learner.validation_loss:.3e}"
-                    ),
-                    (
-                        f"  best: "
-                        f"{learner.best_loss:.3e}"
-                    ),
-                    (
-                        f"  width: "
-                        f"{learner.hidden_width}"
-                    ),
-                    (
-                        f"  loss_fn: "
-                        f"{learner.active_loss_variant}"
-                    ),
-                    (
-                        f"  features: "
-                        f"{learner.active_feature_variant}"
-                    ),
-                    (
-                        f"  activation: "
-                        f"{learner.active_activation_variant}"
-                    ),
-                    (
-                        f"  successes: {learner.evolution_runs}  "
-                        f"rate: {learner.evolution_success_rate:.1%}"
-                    ),
-                ])
-
-            else:
-
-                lines.append(
-                    "  engine: disabled"
-                )
-
-            lines.extend([
-                "",
-                "WORLD",
+                f"WORLD: {getattr(world, 'label', 'Solar System')}",
                 f"  bodies: {len(bodies)}",
-                "",
-                "SIMULATION",
                 (
                     f"  t = "
                     f"{observer.time_seconds / 86400.0:,.2f}"
@@ -1028,46 +1016,38 @@ def main():
                 ),
             ])
 
-            earth = bodies.get("Earth")
+            # World-agnostic: prefer Earth when it exists (solar_system
+            # mode) since it's the most relatable reference body, but
+            # fall back to whatever this world's first real body is
+            # instead of silently vanishing in proxima/alpha_centauri
+            # mode -- this section used to key off the literal string
+            # "Earth" and just disappeared entirely outside the solar
+            # system.
+            primary_name = "Earth" if "Earth" in bodies else next(iter(bodies), None)
+            primary = bodies.get(primary_name) if primary_name else None
 
-            if earth:
-
+            if primary:
                 lines.extend([
                     "",
-                    "EARTH",
-                    (
-                        f"  r = "
-                        f"{earth['radius_au']:.6f} AU"
-                    ),
-                    (
-                        f"  v = "
-                        f"{earth['speed_km_s']:.6f} km/s"
-                    ),
-                    (
-                        f"  E = "
-                        f"{earth['energy']:.9f}"
-                    ),
+                    primary_name.upper(),
+                    f"  r = {primary['radius_au']:.6f} AU",
+                    f"  v = {primary['speed_km_s']:.6f} km/s",
+                    f"  E = {primary['energy']:.9f}",
                 ])
 
             lines.extend([
                 "",
-                "LEGO PRINCIPLE",
-                "  capabilities are modules.",
-                "  parameters are adjustable.",
-                "  providers are replaceable.",
-                "  learning persists across runs.",
+                "COMPUTATION",
+                "  local-cpu: coordinator + renderer",
+                "  fleet: see right panel",
+                "",
+                "modules: " + ", ".join(registry.active()),
             ])
 
-            fig.text(
-                0.015, 0.94,
-                "\n".join(lines),
-                verticalalignment="top",
-                family="monospace",
-                fontsize=8.5,
-                bbox={
-                    "boxstyle": "round",
-                    "alpha": 0.88,
-                },
+            dashboard_ax.text(
+                0.05, 0.88, "\n".join(lines),
+                color=PHOSPHOR, fontsize=7.5, family="monospace",
+                va="top", alpha=0.8,
             )
 
             fig.canvas.draw_idle()
