@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+import loss_blocks
 from lego import Lego, ModuleResult
 
 
@@ -214,10 +215,21 @@ class NeuralLearner(Lego):
     }
 
     def get_loss_function(self):
-        return self.LOSS_VARIANTS.get(
-            self.active_loss_variant,
-            self.LOSS_VARIANTS["mse"],
-        )
+        """
+        Returns a loss_blocks.ComposedLoss, not a plain function --
+        callers use .value(prediction, target) and
+        .grad(prediction, target). Accepts both legacy single names
+        ("mse") and composed names ("huber/magnitude").
+        """
+        return loss_blocks.from_name(self.active_loss_variant)
+
+    def _set_loss_core(self, core: str) -> None:
+        current = loss_blocks.from_name(self.active_loss_variant)
+        self.active_loss_variant = f"{core}/{current.weighting}"
+
+    def _set_loss_weighting(self, weighting: str) -> None:
+        current = loss_blocks.from_name(self.active_loss_variant)
+        self.active_loss_variant = f"{current.core}/{weighting}"
 
     def get_feature_function(self):
         return self.FEATURE_VARIANTS.get(
@@ -305,8 +317,21 @@ class NeuralLearner(Lego):
         for command in commands:
             if command.startswith("switch_loss_"):
                 name = command.replace("switch_loss_", "")
-                if name in self.LOSS_VARIANTS:
-                    self.active_loss_variant = name
+                # "switch_loss_weighted" -> legacy name "weighted_mse";
+                # the old lookup checked self.LOSS_VARIANTS, whose keys
+                # don't include the bare "weighted" suffix, so this
+                # exact command silently no-opped before.
+                legacy_name = {"weighted": "weighted_mse"}.get(name, name)
+                if legacy_name in loss_blocks.LEGACY_ALIASES:
+                    self.active_loss_variant = legacy_name
+            elif command.startswith("switch_core_"):
+                core_name = command.replace("switch_core_", "")
+                if core_name in loss_blocks.CORE_PENALTIES:
+                    self._set_loss_core(core_name)
+            elif command.startswith("switch_weighting_"):
+                weighting_name = command.replace("switch_weighting_", "")
+                if weighting_name in loss_blocks.WEIGHTINGS:
+                    self._set_loss_weighting(weighting_name)
             elif command.startswith("switch_features_"):
                 name = command.replace("switch_features_", "")
                 if name in self.FEATURE_VARIANTS:
@@ -573,6 +598,20 @@ class NeuralLearner(Lego):
         "switch_loss_mae": ("active_loss_variant", "mae"),
         "switch_loss_huber": ("active_loss_variant", "huber"),
         "switch_loss_weighted": ("active_loss_variant", "weighted_mse"),
+        # Block-based composer: core penalty and weighting mutate
+        # independently, 6 x 4 = 24 reachable combinations versus the
+        # 4 fixed pairs above (kept for backward compatibility with
+        # already-persisted self_program.json histories).
+        "switch_core_square": ("active_loss_variant", "core:square"),
+        "switch_core_absolute": ("active_loss_variant", "core:absolute"),
+        "switch_core_huber": ("active_loss_variant", "core:huber"),
+        "switch_core_logcosh": ("active_loss_variant", "core:logcosh"),
+        "switch_core_quartic": ("active_loss_variant", "core:quartic"),
+        "switch_core_pseudohuber": ("active_loss_variant", "core:pseudohuber"),
+        "switch_weighting_uniform": ("active_loss_variant", "weighting:uniform"),
+        "switch_weighting_magnitude": ("active_loss_variant", "weighting:magnitude"),
+        "switch_weighting_inverse": ("active_loss_variant", "weighting:inverse"),
+        "switch_weighting_logmagnitude": ("active_loss_variant", "weighting:logmagnitude"),
         "switch_features_basic": ("active_feature_variant", "basic"),
         "switch_features_extended": ("active_feature_variant", "extended"),
         "switch_features_phase": ("active_feature_variant", "phase_based"),
@@ -690,6 +729,24 @@ class NeuralLearner(Lego):
         index = self.training_steps % len(candidates)
         return candidates[index]
 
+    def _reference_score(self):
+        """
+        Fixed yardstick for evolution accept/reject, deliberately
+        independent of whichever loss function is currently active.
+
+        evaluate_candidate_real() used to compare self.validation_loss
+        (under the OLD active variant) against a freshly computed
+        _validation_loss() (under whatever the candidate just switched
+        to) whenever the candidate included a loss-changing command.
+        Those two numbers are in different units -- MAE runs
+        systematically smaller than MSE for residuals under 1, so
+        switching mse -> mae read as a large "improvement" from the
+        unit change alone, regardless of whether the network actually
+        predicts better. Every candidate is judged on this one stable
+        metric instead, no matter what it trains on.
+        """
+        return self._validation_loss(metric=loss_blocks.REFERENCE_METRIC)
+
     def evaluate_candidate_real(self, candidate):
         """
         Real transactional validation.
@@ -701,7 +758,7 @@ class NeuralLearner(Lego):
         if not self.validate_self_program(candidate):
             return False, float("inf")
 
-        baseline = float(self.validation_loss)
+        baseline = self._reference_score()
 
         # Take snapshot before mutation
         snapshot = self.snapshot_state()
@@ -710,18 +767,26 @@ class NeuralLearner(Lego):
             # Apply candidate mutations
             self.apply_self_program(candidate)
 
-            # Run actual validation on real data
-            validation_loss = self._validation_loss()
+            # Judged on the fixed reference metric, not whatever loss
+            # the candidate just switched to.
+            reference_after = self._reference_score()
 
-            if validation_loss >= baseline:
+            if reference_after >= baseline:
                 # No improvement: rollback
                 self.restore_state(snapshot)
-                return False, validation_loss
+                return False, reference_after
 
-            # Improved! Keep the mutations
-            return True, validation_loss
+            # Improved. Keep the mutation, and refresh the displayed
+            # validation_loss/best_loss under whatever variant is now
+            # active -- a switch_loss_*/switch_core_*/switch_weighting_*
+            # command just changed what that number means.
+            self.validation_loss = self._validation_loss()
+            if self.validation_loss < self.best_loss:
+                self.best_loss = self.validation_loss
 
-        except Exception as e:
+            return True, reference_after
+
+        except Exception:
             # Crash or numerical instability: rollback and reject
             self.restore_state(snapshot)
             return False, float("inf")
@@ -761,8 +826,17 @@ class NeuralLearner(Lego):
                 )
             elif command.startswith("switch_loss_"):
                 loss_name = command.replace("switch_loss_", "")
-                if loss_name in self.LOSS_VARIANTS:
-                    self.active_loss_variant = loss_name
+                legacy_name = {"weighted": "weighted_mse"}.get(loss_name, loss_name)
+                if legacy_name in loss_blocks.LEGACY_ALIASES:
+                    self.active_loss_variant = legacy_name
+            elif command.startswith("switch_core_"):
+                core_name = command.replace("switch_core_", "")
+                if core_name in loss_blocks.CORE_PENALTIES:
+                    self._set_loss_core(core_name)
+            elif command.startswith("switch_weighting_"):
+                weighting_name = command.replace("switch_weighting_", "")
+                if weighting_name in loss_blocks.WEIGHTINGS:
+                    self._set_loss_weighting(weighting_name)
             elif command.startswith("switch_features_"):
                 feature_name = command.replace("switch_features_", "")
                 if feature_name in self.FEATURE_VARIANTS:
@@ -869,19 +943,17 @@ class NeuralLearner(Lego):
         prediction, cache = self._forward(x)
 
         loss_fn = self.get_loss_function()
-        loss = loss_fn(prediction, target)
-
-        error = prediction - target
+        loss = loss_fn.value(prediction, target)
 
         x, z1, a1, z2, a2 = cache
 
-        n = float(len(x))
-
-        dy = (
-            2.0
-            * error
-            / n
-        )
+        # The actual derivative of whatever loss is active, not a
+        # hardcoded MSE gradient -- previously this was always
+        # 2*error/n regardless of active_loss_variant, so switching to
+        # MAE/Huber/etc. changed the reported loss but silently kept
+        # training on the MSE gradient. Value and grad now come from
+        # the same composed-loss block, so they cannot disagree.
+        dy = loss_fn.grad(prediction, target)
 
         dw3 = a2.T @ dy
         db3 = np.sum(
@@ -967,7 +1039,7 @@ class NeuralLearner(Lego):
         self.training_steps += 1
         self.last_loss = loss
 
-    def _validation_loss(self):
+    def _validation_loss(self, metric=None):
         if self.sim is None:
             return float("inf")
 
@@ -984,8 +1056,8 @@ class NeuralLearner(Lego):
 
         prediction, _ = self._forward(x)
 
-        loss_fn = self.get_loss_function()
-        return loss_fn(prediction, target)
+        loss_fn = metric or self.get_loss_function()
+        return loss_fn.value(prediction, target)
 
     def learn(self):
         if self.sim is None:
