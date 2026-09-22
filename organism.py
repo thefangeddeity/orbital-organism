@@ -378,18 +378,30 @@ def main():
     PLATEAU_GENERATIONS = 15
     DISPATCH_COOLDOWN_SECONDS = 600.0
 
-    dispatch_state = {"process": None, "last_dispatch_time": 0.0}
+    dispatch_state = {"process": None, "last_dispatch_time": 0.0, "log_file": None}
+
+    def _reap_finished_dispatch():
+        # Closes this process's own handle to the log file once the
+        # subprocess has exited -- Popen inherits the handle, but the
+        # parent's copy needs closing too, or an overnight run that
+        # fires several dispatches leaks one file handle per dispatch.
+        process = dispatch_state["process"]
+
+        if process is not None and process.poll() is not None:
+            if dispatch_state["log_file"] is not None:
+                dispatch_state["log_file"].close()
+                dispatch_state["log_file"] = None
+            dispatch_state["process"] = None
 
     def _maybe_dispatch_to_tanzania(learner, now_seconds):
+        _reap_finished_dispatch()
+
         stalled = learner.generations_since_accepted >= PLATEAU_GENERATIONS
 
         if not stalled:
             return
 
-        in_flight = (
-            dispatch_state["process"] is not None
-            and dispatch_state["process"].poll() is None
-        )
+        in_flight = dispatch_state["process"] is not None
         if in_flight:
             return
 
@@ -411,13 +423,24 @@ def main():
             f"an accepted mutation) -- dispatching a wide sweep to Tanzania"
         )
 
+        # Logged, not discarded -- this fires unattended (that's the
+        # whole point), and a failed dispatch (Tanzania drops offline
+        # mid-sweep, say) with output sent to DEVNULL would leave no
+        # trace at all: just a silent cooldown with nothing to explain
+        # it later.
+        log_dir = Path(__file__).resolve().parent / "state" / "dispatch_log"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"{time.strftime('%Y%m%d-%H%M%S')}.log"
+        log_file = open(log_path, "w", encoding="utf-8")
+
         dispatch_state["process"] = subprocess.Popen(
             [sys.executable, str(dispatch_script), "explore_mutation_space"],
             cwd=str(dispatch_script.parent),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
         )
         dispatch_state["last_dispatch_time"] = now_seconds
+        dispatch_state["log_file"] = log_file
 
     def _sphere_mesh(cx, cy, cz, radius, resolution=10):
         u = np.linspace(0, 2 * np.pi, resolution)
