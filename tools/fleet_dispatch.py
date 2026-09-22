@@ -43,8 +43,22 @@ def deploy_code(host: str) -> None:
     # remote_runner.py imports neural_learner at module load time
     # regardless of which task is invoked, so all five files are
     # needed on any host running ANY task from it, not just the ones
-    # that task actually touches.
-    _run(["ssh", host, f"mkdir -p {REMOTE_DIR}"])
+    # that task actually touches. cannon_lib is only imported inside
+    # run_train_local_physics(), but shipped unconditionally too --
+    # it's small, and conditional shipping based on which task a given
+    # call happens to need is real complexity for negligible savings.
+    _run(["ssh", host, f"mkdir -p {REMOTE_DIR}/cannon_lib"])
+    # scp -r into an already-existing destination nests source-under-
+    # destination (cannon_lib/cannon/cannon) rather than replacing it --
+    # removing the leaf first lets scp -r create it fresh as the copy
+    # target instead.
+    _run(["ssh", host, f"rm -rf {REMOTE_DIR}/cannon_lib/cannon"])
+    result = _run(
+        ["scp", "-r", str(MODULES_DIR / "cannon_lib" / "cannon"), f"{host}:{REMOTE_DIR}/cannon_lib/"],
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"scp cannon_lib to {host} failed: {result.stderr}")
 
     for name in ("neural_learner.py", "lego.py", "loss_blocks.py", "scratch_blocks.py"):
         result = _run(["scp", str(MODULES_DIR / name), f"{host}:{REMOTE_DIR}/{name}"])

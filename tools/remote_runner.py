@@ -27,6 +27,7 @@ directly as the result.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -272,9 +273,146 @@ def run_generate_world_textures(payload: dict) -> dict:
     }
 
 
+# ======================================================================
+# LOCAL-PHYSICS-BUILDER: a second brain instance, trained on real near-
+# surface ballistics instead of the multi-body Kepler ephemeris the
+# main organism's own brain learns. Third branch of the organism/
+# body-builder/local-physics-builder split: organism's brain handles a
+# body's place in the universe, this handles what happens inside its
+# sphere of influence. Ported from the brain-transplant experiment
+# (proved this works at all -- see that project's results/) into the
+# real dispatch infrastructure instead of a disconnected standalone
+# script with its own stale copy of these modules.
+#
+# Earth only, for now -- cannon/planet.py hardcodes MU_EARTH_M3_S2 and
+# R_EARTH_M as module constants, so this genuinely can't cover another
+# body yet without cannon's own engine gaining a way to swap gravity
+# parameters. Not pretended otherwise.
+# ======================================================================
+
+LOCAL_PHYSICS_LENGTH_SCALE_M = 1000.0
+LOCAL_PHYSICS_VELOCITY_SCALE_MS = 100.0
+LOCAL_PHYSICS_ELEVATIONS_DEG = (25.0, 35.0, 45.0, 55.0, 65.0)
+LOCAL_PHYSICS_TRAINING_STEPS = 4000
+LOCAL_PHYSICS_SELF_EVOLVE_CYCLES = 30
+LOCAL_PHYSICS_SAMPLE_INTERVAL_S = 0.05
+
+
+def _generate_ballistics_samples(gun_mod, physics_mod):
+    samples = []
+    charges = (gun_mod.CHARGE_REFERENCE_KG * f for f in (0.85, 1.0, 1.15))
+
+    for elevation_deg in LOCAL_PHYSICS_ELEVATIONS_DEG:
+        for charge_kg in charges:
+            initial_state, _bore = gun_mod.fire(
+                gun_mod.GRIBEAUVAL_12PDR, gun_mod.IRON_SHOT_12PDR,
+                charge_kg=charge_kg, elevation_rad=math.radians(elevation_deg),
+            )
+            muzzle = initial_state.pos
+            result = physics_mod.integrate_flight(
+                initial_state, drag_enabled=True, ground_enabled=True,
+                sample_interval_s=LOCAL_PHYSICS_SAMPLE_INTERVAL_S,
+            )
+
+            prev = None
+            for _t, state in result.samples:
+                rel_x = (state.pos.x - muzzle.x) / LOCAL_PHYSICS_LENGTH_SCALE_M
+                rel_y = (state.pos.y - muzzle.y) / LOCAL_PHYSICS_LENGTH_SCALE_M
+                vx = state.vel.x / LOCAL_PHYSICS_VELOCITY_SCALE_MS
+                vy = state.vel.y / LOCAL_PHYSICS_VELOCITY_SCALE_MS
+                if prev is not None:
+                    samples.append({"x": list(prev), "y": [rel_x, rel_y]})
+                prev = (rel_x, rel_y, vx, vy)
+
+    return samples
+
+
+def run_train_local_physics(payload: dict) -> dict:
+    """
+    One real training + self-evolution run of a SECOND, independent
+    NeuralLearner instance against real cannon ballistics data --
+    reusing the exact same brain classes (NeuralLearner, loss_blocks,
+    scratch_blocks) the main organism's own brain uses, unmodified.
+    Each call trains a FRESH network from scratch (no persisted state
+    between calls -- local_physics_builder.py on the caller side
+    tracks whether each run's result is an improvement worth keeping,
+    the training itself is stateless per dispatch).
+    """
+    cannon_lib_dir = Path(__file__).resolve().parent / "cannon_lib"
+    sys.path.insert(0, str(cannon_lib_dir))
+    from cannon import gun, physics as cannon_physics
+
+    samples = _generate_ballistics_samples(gun, cannon_physics)
+
+    learner = NeuralLearner()
+    learner.sim = True  # truthiness guard only
+
+    # NeuralLearner.__init__ fixes self.rng at seed 42 always -- every
+    # dispatch would otherwise produce a BIT-IDENTICAL weight init,
+    # training trajectory, and self-evolution choices, with nothing to
+    # explore across repeat calls. Re-seeded from the payload BEFORE
+    # _initialize_network() (which draws the initial weights from
+    # self.rng), so a different payload seed genuinely means a
+    # different, independent training run.
+    seed = int(payload.get("seed", 42))
+    learner.rng = np.random.default_rng(seed)
+
+    # A fresh network, not one loaded from shipped weights (unlike
+    # build_learner() above, which the other tasks use) -- this trains
+    # from scratch every call, so the weights need real initialization
+    # here rather than staying at their post-__init__ None/0-d state.
+    learner._initialize_network()
+    # self_evolve() needs state_path set (it derives self_program_path
+    # from state_path.parent) -- a fresh temp dir each call, not this
+    # host's real state/, so this stays genuinely stateless: no self_
+    # program.json persisting across dispatches and quietly biasing a
+    # "fresh" training run with a previous run's accepted mutations.
+    import tempfile
+    scratch_dir = Path(tempfile.mkdtemp(prefix="local_physics_"))
+    learner.state_path = scratch_dir / "neural_learner.json"
+
+    learner.observation_samples = [
+        (np.asarray(s["x"], dtype=float), np.asarray(s["y"], dtype=float))
+        for s in samples
+    ]
+
+    baseline_loss = learner._validation_loss()
+
+    for _ in range(LOCAL_PHYSICS_TRAINING_STEPS):
+        learner._train_step()
+
+    trained_loss = learner._validation_loss()
+
+    evolution_log = []
+    for _ in range(LOCAL_PHYSICS_SELF_EVOLVE_CYCLES):
+        result = learner.self_evolve()
+        evolution_log.append({
+            "generation": result["generation"],
+            "accepted": result["accepted"],
+            "score": result["score"],
+        })
+
+    final_loss = learner._validation_loss()
+    accepted_count = sum(1 for e in evolution_log if e["accepted"])
+
+    return {
+        "task": "train_local_physics",
+        "body": payload.get("body", "Earth"),
+        "sample_count": len(samples),
+        "baseline_validation_loss": float(baseline_loss),
+        "trained_validation_loss": float(trained_loss),
+        "final_validation_loss": float(final_loss),
+        "self_evolve_cycles": LOCAL_PHYSICS_SELF_EVOLVE_CYCLES,
+        "self_evolve_accepted": accepted_count,
+        "active_loss_variant": learner.active_loss_variant,
+        "active_activation_variant": learner.active_activation_variant,
+    }
+
+
 TASKS = {
     "explore_mutation_space": run_explore_mutation_space,
     "generate_world_textures": run_generate_world_textures,
+    "train_local_physics": run_train_local_physics,
 }
 
 
