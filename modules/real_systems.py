@@ -43,6 +43,31 @@ YEAR = 365.25 * DAY
 SOLAR_RADIUS_KM = 696_000.0
 EARTH_RADIUS_KM = 6_371.0
 
+# The system/body distinction: Ceres' own mean radius (473 km
+# equatorial, 446 km polar -- IAU/NASA reference values, literature-
+# sourced pending a live solar-system-body data source the way
+# exoplanet data already has one) sets the floor for what counts as an
+# organism body at all. A micrometeor or small asteroid is noise, not
+# an entity worth tracking; Ceres itself and anything at least that
+# large -- the planets, the major moons, the other recognized dwarf
+# planets -- registers and is eligible for body-builder's per-body
+# growth. This is shared, not duplicated: both the world-adapter layer
+# (which bodies the organism tracks at all) and body-builder (which
+# bodies get local-physics growth) read the same threshold from here.
+CERES_MEAN_RADIUS_KM = 469.7
+
+
+def registers_as_body(radius_km: float) -> bool:
+    """
+    True if a body is at least Ceres-sized and so counts as part of the
+    organism's world at all -- not a size-based rendering-detail cutoff
+    (that's OrganicBudget's fidelity ladder, a separate concern), but
+    the existence threshold itself: below this, a body doesn't register,
+    full stop, the same way a stray photon doesn't register as a body
+    just because it technically has mass-energy.
+    """
+    return radius_km >= CERES_MEAN_RADIUS_KM
+
 
 def _gm_from_kepler(a_au: float, period_days: float) -> float:
     """
