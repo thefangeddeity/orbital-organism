@@ -211,11 +211,6 @@ def main():
     GAP_HEAD_CONTENT = 0.052
     GAP_SECTION = 0.030
 
-    # Value column for label/value rows -- values land on a tab stop
-    # so they form a readable column instead of ragged inline text.
-    LABEL_X = 0.05
-    VALUE_X = 0.46
-
     def _draw_corner_brackets(panel_ax, size=0.045, alpha=0.7, linewidth=1.4):
         # Angled L-shaped corner brackets, not a plain rectangle border
         # -- the one framing device every reference image shares.
