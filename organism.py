@@ -152,6 +152,7 @@ def main():
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
     fig = plt.figure(figsize=(11, 8))
+    fig.patch.set_facecolor("black")
 
     # Dedicated figure margin for the organism dashboard.
     # The dashboard is figure-relative, so it no longer covers
@@ -189,8 +190,6 @@ def main():
 
     fig.canvas.mpl_connect("scroll_event", _on_scroll)
 
-    budget_visual_config = config.get("organic_budget", {})
-
     def _sphere_mesh(cx, cy, cz, radius, resolution=10):
         u = np.linspace(0, 2 * np.pi, resolution)
         v = np.linspace(0, np.pi, resolution)
@@ -199,19 +198,48 @@ def main():
         zs = cz + radius * np.outer(np.ones_like(u), np.cos(v))
         return xs, ys, zs
 
+    # Real-color approximations, standard astronomy-visualization values.
+    # A fixed prior for now; a natural later hook is letting the organism
+    # refine these once it has real spectral/photometric data to learn
+    # from, the same way it refines loss functions today.
+    BODY_COLORS = {
+        "Sun": "#FDB813",
+        "Mercury": "#9C9C9C",
+        "Venus": "#DDBD8B",
+        "Earth": "#4F82C4",
+        "Mars": "#B7410E",
+        "Jupiter": "#D8A76A",
+        "Saturn": "#E3C16F",
+        "Uranus": "#9FE3F0",
+        "Neptune": "#3D5FE0",
+    }
+
+    PHOSPHOR = (0.0, 1.0, 0.45)
+
+    def _apply_dark_theme(ax):
+        # ax.clear() resets these every frame, so this must be re-applied
+        # every frame too -- not just once at setup.
+        ax.set_facecolor("black")
+
+        for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
+            pane.set_facecolor((0.0, 0.0, 0.0, 1.0))
+            pane.set_edgecolor((*PHOSPHOR, 0.12))
+
+        ax.grid(True, color=PHOSPHOR, alpha=0.15, linewidth=0.5)
+
+        ax.tick_params(colors=(*PHOSPHOR,))
+
+        for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+            axis.label.set_color(PHOSPHOR)
+
     def _visual_radius_au(radius_km):
-        # Bodies are astronomically tiny next to their orbits (Earth's
-        # radius is ~4e-5 AU). True-to-scale spheres would be invisible
-        # next to a multi-AU orbit, so this maps physical radius to a
-        # visible-but-honest size: scaled up, clamped to a sane range,
-        # monotonic so bigger planets still look bigger than smaller ones.
-        scale = float(budget_visual_config.get("body_visual_scale", 4000.0))
-        min_r = float(budget_visual_config.get("min_visual_radius_au", 0.012))
-        max_r = float(budget_visual_config.get("max_visual_radius_au", 0.06))
-
-        radius_au = (radius_km / sim.AU_KM) * scale
-
-        return max(min_r, min(max_r, radius_au))
+        # True-to-scale, deliberately. Bodies are astronomically tiny
+        # next to their orbits (Earth's radius is ~4e-5 AU) -- most
+        # planets will be sub-pixel or invisible at solar-system-wide
+        # zoom. That's correct, not a bug: scroll-zoom in close and the
+        # real relative sizes (Jupiter dwarfing Mercury, etc.) show up
+        # honestly instead of a make-believe uniform scale.
+        return radius_km / sim.AU_KM
 
     last = time.perf_counter()
 
@@ -328,6 +356,7 @@ def main():
             # ----------------------------------------------------------
 
             ax.clear()
+            _apply_dark_theme(ax)
 
             # ----------------------------------------------------------
             # Orbital planes / paths.
@@ -398,7 +427,7 @@ def main():
 
             if budget.fidelity_level >= 1:
 
-                sun_radius_au = _visual_radius_au(sim.SUN.radius) * 3.0
+                sun_radius_au = _visual_radius_au(sim.SUN.radius)
 
                 sxs, sys_, szs = _sphere_mesh(
                     0.0, 0.0, 0.0, sun_radius_au,
@@ -406,7 +435,7 @@ def main():
 
                 ax.plot_surface(
                     sxs, sys_, szs,
-                    color="gold",
+                    color=BODY_COLORS["Sun"],
                     linewidth=0,
                     antialiased=False,
                 )
@@ -431,6 +460,7 @@ def main():
 
                     ax.plot_surface(
                         pxs, pys, pzs,
+                        color=BODY_COLORS.get(name, "#AAAAAA"),
                         linewidth=0,
                         antialiased=False,
                     )
@@ -441,6 +471,7 @@ def main():
                         z + 0.035,
                         name,
                         fontsize=8,
+                        color=PHOSPHOR,
                     )
 
                 # Fidelity-rendered bodies handle their own labels above;
@@ -455,6 +486,7 @@ def main():
                     [0],
                     s=130,
                     marker="o",
+                    color=BODY_COLORS["Sun"],
                 )
 
                 positions_3d_for_scatter = positions_3d
@@ -473,6 +505,7 @@ def main():
                     [z],
                     s=42,
                     marker="o",
+                    color=BODY_COLORS.get(name, "#AAAAAA"),
                 )
 
                 ax.text(
@@ -481,6 +514,7 @@ def main():
                     z + 0.035,
                     name,
                     fontsize=8,
+                    color=PHOSPHOR,
                 )
 
             # ----------------------------------------------------------
@@ -556,12 +590,8 @@ def main():
             ax.set_zlabel("Z (AU)")
 
             ax.set_title(
-                "ORBITAL ORGANISM - CONTINUOUS 3-D WORLD"
-            )
-
-            ax.grid(
-                True,
-                alpha=0.20,
+                "ORBITAL ORGANISM - CONTINUOUS 3-D WORLD",
+                color=PHOSPHOR,
             )
 
             # ----------------------------------------------------------
