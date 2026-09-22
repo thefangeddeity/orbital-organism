@@ -264,6 +264,21 @@ class NeuralLearner(Lego):
             self.best_loss = self.validation_loss
             self._save_state()
 
+        # Seed the in-memory success counter from self_program.json's
+        # "accepted" field, which is already correctly persisted on
+        # every evolution cycle regardless of restarts -- simpler than
+        # reconciling a separate live "generation" (attempts) counter
+        # across a restart, and arguably the more meaningful number
+        # anyway: how many times it has actually improved, not how many
+        # times it merely tried.
+        self._initialize_self_program()
+
+        try:
+            data = self._read_json(self.self_program_path)
+            self.evolution_runs = int(data.get("accepted", 0))
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Neural network
     # ------------------------------------------------------------------
@@ -1149,7 +1164,13 @@ class NeuralLearner(Lego):
             % self.evolution_interval == 0
         ):
             self.last_evolution_result = self.self_evolve()
-            self.evolution_runs += 1
+
+            # Count successes, not attempts -- this is what persists
+            # cleanly across a restart (self_program.json's "accepted"
+            # field already does, with no extra bookkeeping needed) and
+            # it's the more honest number anyway.
+            if self.last_evolution_result.get("accepted"):
+                self.evolution_runs += 1
 
         return ModuleResult(
             observations={

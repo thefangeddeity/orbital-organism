@@ -851,8 +851,8 @@ def main():
                         f"{learner.active_activation_variant}"
                     ),
                     (
-                        f"  gen: {learner.evolution_runs}  "
-                        f"success: {learner.evolution_success_rate:.1%}"
+                        f"  successes: {learner.evolution_runs}  "
+                        f"rate: {learner.evolution_success_rate:.1%}"
                     ),
                 ])
 
@@ -956,7 +956,7 @@ def main():
                     status += (
                         f"  loss={learner.validation_loss:.3e}"
                         f"  steps={learner.training_steps:,}"
-                        f"  gen={learner.evolution_runs}"
+                        f"  successes={learner.evolution_runs}"
                         f"  L{budget.fidelity_level}"
                     )
                 print(f"\r{status}...", end="", flush=True)
