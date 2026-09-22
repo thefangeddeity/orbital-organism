@@ -191,6 +191,31 @@ def main():
 
     PHOSPHOR = (0.0, 0.85, 1.0)
 
+    # Type scale: five steps, not the nine this had grown. Sizes that
+    # differ by 0.5pt read as a mistake rather than a decision.
+    FS_TITLE = 13
+    FS_PANEL = 11
+    FS_SUBHEAD = 9
+    FS_BODY = 7.5
+    FS_CAPTION = 6.5
+
+    # Two text opacities, not six.
+    A_PRIMARY = 0.92
+    A_SECONDARY = 0.55
+
+    # Shared vertical rhythm. Every panel header sits on the same
+    # baseline, and header->content / section gaps use one value each
+    # instead of 0.050-vs-0.055 and 0.018-vs-0.020 pairs.
+    PANEL_TITLE_Y = 0.962
+    GAP_HEAD_RULE = 0.022
+    GAP_HEAD_CONTENT = 0.052
+    GAP_SECTION = 0.030
+
+    # Value column for label/value rows -- values land on a tab stop
+    # so they form a readable column instead of ragged inline text.
+    LABEL_X = 0.05
+    VALUE_X = 0.46
+
     def _draw_corner_brackets(panel_ax, size=0.045, alpha=0.7, linewidth=1.4):
         # Angled L-shaped corner brackets, not a plain rectangle border
         # -- the one framing device every reference image shares.
@@ -212,7 +237,7 @@ def main():
                 transform=panel_ax.transAxes, clip_on=False, solid_capstyle="butt",
             )
 
-    def _draw_separator(panel_ax, y, alpha=0.22):
+    def _draw_separator(panel_ax, y, alpha=0.18):
         panel_ax.plot(
             [0.05, 0.95], [y, y],
             color=(*PHOSPHOR, alpha), linewidth=0.6,
@@ -222,7 +247,9 @@ def main():
     def _style_2d_panel(panel_ax):
         panel_ax.set_facecolor(NAVY_BG)
         for spine in panel_ax.spines.values():
-            spine.set_color((*PHOSPHOR, 0.12))
+            # Above the internal separators' alpha: a divider inside a
+            # frame should never out-weigh the frame containing it.
+            spine.set_color((*PHOSPHOR, 0.30))
         panel_ax.set_xticks([])
         panel_ax.set_yticks([])
         panel_ax.set_xlim(0, 1)
@@ -251,7 +278,28 @@ def main():
     # every frame below, not a direct axis-limit write -- otherwise the
     # per-frame auto-fit would silently undo any scroll zoom the instant
     # the next frame drew.
-    camera_state = {"zoom_factor": 1.0}
+    view_state_path = Path(__file__).resolve().parent / "state" / "view.json"
+
+    def _load_view_state():
+        try:
+            data = json.loads(view_state_path.read_text(encoding="utf-8-sig"))
+            return {"zoom_factor": float(data.get("zoom_factor", 1.0))}
+        except Exception:
+            return {"zoom_factor": 1.0}
+
+    def _save_view_state():
+        try:
+            view_state_path.parent.mkdir(parents=True, exist_ok=True)
+            temp = view_state_path.with_suffix(".tmp")
+            temp.write_text(
+                json.dumps({"zoom_factor": camera_state["zoom_factor"]}),
+                encoding="utf-8",
+            )
+            temp.replace(view_state_path)
+        except Exception:
+            pass
+
+    camera_state = _load_view_state()
 
     def _on_scroll(event):
         if event.button == "up":
@@ -263,6 +311,10 @@ def main():
             0.05,
             min(20.0, camera_state["zoom_factor"]),
         )
+        # Saved on every scroll, not just at shutdown -- a force-killed
+        # process (window closed via task manager, not the 'x' button)
+        # must not silently revert the zoom to default.
+        _save_view_state()
 
     fig.canvas.mpl_connect("scroll_event", _on_scroll)
 
@@ -434,19 +486,31 @@ def main():
     # radii render as a stretched ellipse without this correction.
     RIGHT_PANEL_ASPECT = (9 * PANEL_HEIGHT) / (16 * 0.18)
 
+    def _caption(panel_ax, x, y, text, ha="left"):
+        """
+        One treatment for every caption sitting above a graphic --
+        'LAST SWEEP' and 'W1 4x24' are the same thing structurally and
+        were styled differently (bold/7pt/a0.7 vs regular/6pt/a0.5).
+        """
+        panel_ax.text(
+            x, y, text,
+            color=PHOSPHOR, fontsize=FS_CAPTION, weight="bold",
+            va="center", ha=ha, alpha=0.6,
+        )
+
     def _render_brain_section(y_top):
         """The organism itself: its live weight matrices."""
         right_ax.text(
             0.05, y_top, "BRAIN",
-            color=PHOSPHOR, fontsize=11, weight="bold", va="center",
+            color=PHOSPHOR, fontsize=FS_PANEL, weight="bold", va="center",
         )
-        _draw_separator(right_ax, y_top - 0.022)
+        _draw_separator(right_ax, y_top - GAP_HEAD_RULE)
 
         if learner is None:
             right_ax.text(
-                0.05, y_top - 0.06, "engine disabled",
-                color=PHOSPHOR, fontsize=7, family="monospace",
-                va="center", alpha=0.5,
+                0.05, y_top - GAP_HEAD_CONTENT, "engine disabled",
+                color=PHOSPHOR, fontsize=FS_BODY,
+                va="center", alpha=A_SECONDARY,
             )
             return y_top - 0.10
 
@@ -474,15 +538,14 @@ def main():
         # needs the breathing room more than the pixels.
         band_heights = [0.038, 0.080, 0.038]
         label_gap = 0.020
-        band_gap = 0.018
+        band_gap = label_gap
 
-        y = y_top - 0.050
+        y = y_top - GAP_HEAD_CONTENT
 
         for (label, matrix), band_h in zip(weight_matrices, band_heights):
-            right_ax.text(
-                0.05, y,
+            _caption(
+                right_ax, 0.05, y,
                 f"{label}  {matrix.shape[0]}×{matrix.shape[1]}",
-                color=PHOSPHOR, fontsize=6, va="center", alpha=0.5,
             )
             y -= label_gap
             right_ax.imshow(
@@ -495,16 +558,21 @@ def main():
 
         return y
 
-    def _render_extension_tanzania(y_top):
-        """One fleet extension. Tina/Ariana slot in the same way."""
-        online = tanzania_provider.available()
+    def _render_extension(provider, y_top, cap_pct, show_dispatch=False):
+        """
+        One fleet extension row. Every configured machine gets one --
+        Tina and Ariana were real, configured providers that never
+        appeared anywhere in this panel despite the section being
+        called EXTENSIONS.
+        """
+        online = provider.available()
         # One hue, not a red/cyan switch -- online is full phosphor
         # brightness, offline is the same phosphor dimmed.
         status_color = (*PHOSPHOR, 0.9) if online else (*PHOSPHOR, 0.4)
 
         right_ax.text(
-            0.05, y_top, "TANZANIA",
-            color=PHOSPHOR, fontsize=9.5, weight="bold", va="center",
+            0.05, y_top, provider.name.upper(),
+            color=PHOSPHOR, fontsize=FS_SUBHEAD, weight="bold", va="center",
         )
 
         # Badge text is centered in its box on both axes. va="center"
@@ -512,7 +580,7 @@ def main():
         # for all-caps text with no descenders, so the label carries a
         # small upward optical correction.
         badge_left, badge_right = 0.60, 0.92
-        badge_bottom, badge_h = y_top - 0.019, 0.038
+        badge_bottom, badge_h = y_top - 0.017, 0.034
         right_ax.add_patch(
             Rectangle(
                 (badge_left, badge_bottom), badge_right - badge_left, badge_h,
@@ -529,30 +597,45 @@ def main():
             ha="center", va="center",
         )
 
-        y = y_top - 0.036
+        # Resource cap is a static config constant, so it belongs on
+        # one line here rather than as the largest graphic in the
+        # panel -- a radial gauge animating nothing was the least
+        # earned pixel-spend on screen.
+        y = y_top - 0.032
         right_ax.text(
-            0.05, y, tanzania_provider.host_info,
-            color=PHOSPHOR, fontsize=7, va="center", alpha=0.55,
+            0.05, y,
+            f"{provider.host_info} · cap {cap_pct:.0f}%",
+            color=PHOSPHOR, fontsize=FS_CAPTION, va="center", alpha=A_SECONDARY,
         )
 
-        job_count, last_task = _tanzania_dispatch_history()
-
-        info_lines = [
-            f"{tanzania_provider.role or 'n/a'}",
-            "",
-            f"jobs sent: {job_count}",
-        ]
-        if last_task:
-            info_lines.append(f"last: {last_task}")
-        else:
-            info_lines.append("last: none yet")
-
-        y -= 0.028
+        # Prose, not a numeric column -- sans, per the rule that
+        # monospace is reserved for values that need to align.
+        y -= 0.026
         right_ax.text(
-            0.05, y, "\n".join(info_lines),
-            color=PHOSPHOR, fontsize=7, family="monospace",
-            va="top", alpha=0.75,
+            0.05, y, provider.role or "n/a",
+            color=PHOSPHOR, fontsize=FS_BODY, va="top", alpha=A_SECONDARY,
         )
+        y -= 0.024
+
+        if show_dispatch:
+            job_count, last_task = _tanzania_dispatch_history()
+            for label, value in (
+                ("jobs sent", str(job_count)),
+                ("last", last_task or "none yet"),
+            ):
+                right_ax.text(
+                    0.05, y, label,
+                    color=PHOSPHOR, fontsize=FS_BODY,
+                    va="top", alpha=A_SECONDARY,
+                )
+                right_ax.text(
+                    0.42, y, value,
+                    color=PHOSPHOR, fontsize=FS_BODY, family="monospace",
+                    va="top", alpha=A_PRIMARY,
+                )
+                y -= 0.024
+
+        return y
 
         return y - 0.10
 
@@ -591,10 +674,7 @@ def main():
         hi = max(log_scored.values())
         span = (hi - lo) or 1.0
 
-        right_ax.text(
-            0.05, y_top, "LAST SWEEP",
-            color=PHOSPHOR, fontsize=7, weight="bold", va="center", alpha=0.7,
-        )
+        _caption(right_ax, 0.05, y_top, "LAST SWEEP")
 
         # Clearance below the label's own text height -- at 0.030 the
         # first row was drawn straight through "LAST SWEEP".
@@ -627,78 +707,66 @@ def main():
                     Rectangle((x, y), cell_w - gap, cell_h, color=color)
                 )
 
-        # Horizontal, not rotated: rotated 5.5pt text was effectively
-        # unreadable, and these fit upright at this column width.
-        label_y = grid_top - len(ACTIVATION_ORDER) * (cell_h + gap) - 0.004
+        # Horizontal, not rotated (rotated 5.5pt was unreadable), and
+        # abbreviated deliberately rather than truncated mid-word --
+        # loss_name[:4] produced "hube" and "weig", which read as typos.
+        SHORT_NAME = {
+            "mse": "mse",
+            "mae": "mae",
+            "huber": "huber",
+            "weighted_mse": "w-mse",
+        }
+        label_y = grid_top - len(ACTIVATION_ORDER) * (cell_h + gap) - 0.006
         for col, loss_name in enumerate(LOSS_ORDER):
             right_ax.text(
                 grid_left + col * cell_w + (cell_w - gap) / 2,
-                label_y, loss_name[:4],
-                color=PHOSPHOR, fontsize=6, family="monospace",
-                alpha=0.5, ha="center", va="top",
+                label_y, SHORT_NAME.get(loss_name, loss_name),
+                color=PHOSPHOR, fontsize=FS_CAPTION,
+                alpha=0.6, ha="center", va="top",
             )
 
         # The rows had no legend at all before -- the grid was
         # unreadable without knowing what they meant.
         right_ax.text(
-            grid_left, label_y - 0.024,
+            grid_left, label_y - 0.026,
             "rows: " + " / ".join(ACTIVATION_ORDER),
-            color=PHOSPHOR, fontsize=5.5, family="monospace",
-            alpha=0.4, va="top",
+            color=PHOSPHOR, fontsize=FS_CAPTION,
+            alpha=A_SECONDARY, va="top",
         )
 
-        return label_y - 0.055
-
-    def _render_resource_gauge(center_y):
-        gauge_cx = 0.5
-        gauge_rx = 0.105
-        gauge_ry = gauge_rx / RIGHT_PANEL_ASPECT
-
-        theta_bg = np.linspace(0, 2 * np.pi, 120)
-        right_ax.plot(
-            gauge_cx + gauge_rx * np.cos(theta_bg),
-            center_y + gauge_ry * np.sin(theta_bg),
-            color=(*PHOSPHOR, 0.15), linewidth=4, solid_capstyle="round",
-        )
-
-        frac = max(0.0, min(1.0, tanzania_cap_pct / 100.0))
-        theta_fg = np.linspace(np.pi / 2, np.pi / 2 - 2 * np.pi * frac, 100)
-        right_ax.plot(
-            gauge_cx + gauge_rx * np.cos(theta_fg),
-            center_y + gauge_ry * np.sin(theta_fg),
-            color=(*PHOSPHOR, 0.85), linewidth=4, solid_capstyle="round",
-        )
-
-        right_ax.text(
-            gauge_cx, center_y + 0.0015, f"{tanzania_cap_pct:.0f}%",
-            color=PHOSPHOR, fontsize=9, weight="bold",
-            ha="center", va="center",
-        )
-        right_ax.text(
-            gauge_cx, center_y - gauge_ry - 0.016, "RESOURCE CAP",
-            color=PHOSPHOR, fontsize=6, ha="center", va="top", alpha=0.5,
-        )
+        return label_y - 0.050
 
     def _render_right_panel():
         right_ax.clear()
         _style_2d_panel(right_ax)
 
-        brain_bottom = _render_brain_section(0.972)
+        brain_bottom = _render_brain_section(PANEL_TITLE_Y)
 
         # Flow from where the brain section actually ended rather than
         # a guessed constant -- a hardcoded anchor put this header on
         # top of the W3 heatmap. Band heights are fixed, so this is
         # still deterministic frame to frame, just correct.
-        extensions_top = brain_bottom - 0.030
+        extensions_top = brain_bottom - GAP_SECTION
         right_ax.text(
             0.05, extensions_top, "EXTENSIONS",
-            color=PHOSPHOR, fontsize=11, weight="bold", va="center",
+            color=PHOSPHOR, fontsize=FS_PANEL, weight="bold", va="center",
         )
-        _draw_separator(right_ax, extensions_top - 0.022)
+        _draw_separator(right_ax, extensions_top - GAP_HEAD_RULE)
 
-        after_tanzania = _render_extension_tanzania(extensions_top - 0.055)
-        _render_sweep_grid(after_tanzania)
-        _render_resource_gauge(0.085)
+        provider_caps = config.get("providers", {})
+
+        y = _render_extension(
+            tanzania_provider, extensions_top - GAP_HEAD_CONTENT,
+            tanzania_cap_pct, show_dispatch=True,
+        )
+        y = _render_sweep_grid(y - 0.012)
+
+        for name in ("tina", "ariana"):
+            provider = providers.get(name)
+            if provider is None:
+                continue
+            cap = float(provider_caps.get(name, {}).get("resource_cap_pct", 100))
+            y = _render_extension(provider, y - GAP_SECTION, cap)
 
         # imshow autoscales the axes to the image extent; re-assert the
         # panel's own coordinate frame so every later placement stays
@@ -940,7 +1008,7 @@ def main():
                         antialiased=False,
                     )
 
-                    ax.text(
+                    label = ax.text(
                         x + 0.035,
                         y + 0.035,
                         z + 0.035,
@@ -948,6 +1016,13 @@ def main():
                         fontsize=8,
                         color=PHOSPHOR,
                     )
+                    # Axes3D text isn't clipped to the axes' screen
+                    # bounds by default -- a body near the edge of the
+                    # cube can project to a screen position outside the
+                    # 3-D panel entirely, drawing over the dashboard.
+                    # The clip box has to be set explicitly per artist.
+                    label.set_clip_on(True)
+                    label.set_clip_box(ax.bbox)
 
                 # Fidelity-rendered bodies handle their own labels above;
                 # the L0 scatter path below is skipped this frame.
@@ -983,7 +1058,7 @@ def main():
                     color=BODY_COLORS.get(name, "#AAAAAA"),
                 )
 
-                ax.text(
+                label = ax.text(
                     x + 0.035,
                     y + 0.035,
                     z + 0.035,
@@ -991,6 +1066,8 @@ def main():
                     fontsize=8,
                     color=PHOSPHOR,
                 )
+                label.set_clip_on(True)
+                label.set_clip_box(ax.bbox)
 
             # ----------------------------------------------------------
             # Camera / spatial scale.
@@ -1086,14 +1163,16 @@ def main():
             _style_2d_panel(dashboard_ax)
 
             dashboard_ax.text(
-                0.05, 0.96, "ORGANISM",
-                color=PHOSPHOR, fontsize=11, weight="bold", va="center",
+                0.05, PANEL_TITLE_Y, "ORGANISM",
+                color=PHOSPHOR, fontsize=FS_PANEL, weight="bold", va="center",
             )
             dashboard_ax.text(
-                0.05, 0.93, f"age {_format_age(age_seconds)} · {learning_state}",
-                color=PHOSPHOR, fontsize=7, va="center", alpha=0.55,
+                0.05, PANEL_TITLE_Y - 0.030,
+                f"age {_format_age(age_seconds)} · {learning_state}",
+                color=PHOSPHOR, fontsize=FS_CAPTION,
+                va="center", alpha=A_SECONDARY,
             )
-            _draw_separator(dashboard_ax, 0.905)
+            _draw_separator(dashboard_ax, PANEL_TITLE_Y - GAP_HEAD_RULE - 0.032)
 
             # The real signal -- is it learning, is it improving --
             # comes first. Static facts that never change for the life
