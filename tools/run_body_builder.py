@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
 """
 Run ON 7elwe. The continuous counterpart to organism.py's own live
-self-evolution loop, but for body-builder (modules/body_builder.py):
-round-robins through every Ceres-or-larger body in the currently
-configured world, proposing one candidate texture-generation move per
-cycle, dispatching the real generation across the fleet (Tanzania and
-Tina, alternating -- see HOSTS below), and persisting the outcome --
-meant to be started once and left running for hours unattended, same
-"let it run all day" shape as organism.py itself.
+self-evolution loop, but for body-builder (modules/body_builder.py) --
+one of three branches in the organism/body-builder/local-physics-
+builder split: this one grows pure visual/fidelity detail (texture
+resolution, octaves), never physics. Round-robins through every
+Ceres-or-larger body in the currently configured world, proposing one
+candidate texture-generation move per cycle, dispatching the real
+generation, and persisting the outcome -- meant to be started once and
+left running for hours unattended, same "let it run all day" shape as
+organism.py itself.
 
-Every accepted candidate is independently re-generated on whichever
-host didn't produce it, as a real cross-host reproducibility check
-(Tina's established role is "validation + backup" -- this gives it
-exactly that, on real data, not busywork).
+Texture generation is real work but genuinely less intensive than
+local-physics-builder's actual physics training -- runs on Tina
+exclusively (TEXTURE_HOST below), keeping Tanzania free and dedicated
+for the heavier physics side. Every accepted candidate gets a repeat-
+run consistency check on Tina itself (same inputs, independent
+dispatch, compare) rather than a cross-host one now that there's only
+one host in this domain -- still real signal (a mismatch would mean
+non-determinism worth knowing about), just not cross-machine anymore.
 
 Deliberately a SEPARATE, standalone process, not wired into organism
-.py's own render loop -- this dispatches to a fleet host every cycle (a
-real SSH round-trip, seconds not milliseconds) and organism.py's frame
-budget has no room for that, the same reasoning dispatch_tanzania.py's
-own module docstring already gives for keeping ITS dispatches out of
-the render loop.
+.py's own render loop -- this dispatches over SSH every cycle (seconds,
+not milliseconds) and organism.py's frame budget has no room for that,
+the same reasoning dispatch_tanzania.py's own module docstring already
+gives for keeping ITS dispatches out of the render loop.
 
 Usage:
     python3 run_body_builder.py [--interval SECONDS] [--cycles N]
@@ -53,18 +58,14 @@ import body_builder as bb
 import fleet_dispatch as fd
 from real_systems import build_world, registers_as_body
 
-# Generation load-splits round-robin across both hosts, instead of
-# Tanzania alone carrying both organism.py's own occasional dispatches
-# AND body-builder's continuous ~60s-cadence ones. Tina's real,
-# established role is "validation + backup" (organism.json), which
-# this also gives it something genuine to do: after a candidate is
-# accepted, the OTHER host independently regenerates it and the two
-# are compared. Confirmed live before wiring this in: the same
+# Texture generation is real but the lighter of the two workloads --
+# Tina runs it exclusively, so Tanzania stays dedicated to local-
+# physics-builder's heavier physics training. Confirmed live: the same
 # (body, resolution, octaves, seed) produces a bit-identical heightmap
-# on Tanzania and Tina (pure deterministic numpy, no host-specific
-# randomness) -- so a mismatch here would be a real, meaningful
-# finding, not noise.
-HOSTS = ("tanzania", "tina")
+# across independent runs (pure deterministic numpy, no host-specific
+# randomness) -- so the repeat-run check below is real signal, not
+# theater, even without a second host to cross-check against.
+TEXTURE_HOST = "tina"
 
 
 def _load_sim():
@@ -129,34 +130,32 @@ def generate_via_host(host: str):
     return generate_fn
 
 
-def validate_on_other_host(body_name: str, params: dict, expected_heightmap, generator_host: str) -> dict:
+def validate_repeat_run(body_name: str, params: dict, expected_heightmap) -> dict:
     """
-    Independently regenerates an ALREADY-ACCEPTED candidate on whichever
-    host didn't generate it, and compares. Real cross-host
-    reproducibility validation, not a formality -- confirmed live
-    beforehand that a match is the genuinely expected outcome (bit-
-    identical arrays across Tanzania and Tina for the same inputs), so
-    a mismatch here is real signal, not noise to explain away.
+    Independently re-dispatches an ALREADY-ACCEPTED candidate's exact
+    inputs to TEXTURE_HOST a second time and compares. With texture
+    generation now single-host (Tina only -- see TEXTURE_HOST), this is
+    a repeat-run consistency check rather than a cross-host one: still
+    real signal (any mismatch would mean the "deterministic" generator
+    isn't, which is worth knowing), just not cross-machine anymore.
     """
-    other_host = HOSTS[1] if generator_host == HOSTS[0] else HOSTS[0]
-
     try:
-        result = fd.dispatch(other_host, "generate_world_textures", _texture_payload(body_name, params))
+        result = fd.dispatch(TEXTURE_HOST, "generate_world_textures", _texture_payload(body_name, params))
         heightmap = result.get("textures", {}).get(body_name, {}).get("heightmap")
     except Exception as exc:
-        return {"validated": False, "host": other_host, "reason": str(exc)}
+        return {"validated": False, "host": TEXTURE_HOST, "reason": str(exc)}
 
     if heightmap is None:
-        return {"validated": False, "host": other_host, "reason": "no heightmap returned"}
+        return {"validated": False, "host": TEXTURE_HOST, "reason": "no heightmap returned"}
 
     a = np.asarray(expected_heightmap, dtype=float)
     b = np.asarray(heightmap, dtype=float)
 
     if a.shape != b.shape:
-        return {"validated": False, "host": other_host, "reason": f"shape mismatch {a.shape} vs {b.shape}"}
+        return {"validated": False, "host": TEXTURE_HOST, "reason": f"shape mismatch {a.shape} vs {b.shape}"}
 
     max_diff = float(np.max(np.abs(a - b)))
-    return {"validated": max_diff < 1e-9, "host": other_host, "max_diff": max_diff}
+    return {"validated": max_diff < 1e-9, "host": TEXTURE_HOST, "max_diff": max_diff}
 
 
 def run(interval_s: float, max_cycles: int | None) -> None:
@@ -181,12 +180,10 @@ def run(interval_s: float, max_cycles: int | None) -> None:
         params = bb.current_params(state, body_name)
         move, candidate = bb.propose_candidate(params, rng)
 
-        host = HOSTS[cycle_count % len(HOSTS)]
-
         started = time.perf_counter()
         outcome = bb.evaluate_candidate(
             state, body_name, move, candidate,
-            generate_fn=generate_via_host(host),
+            generate_fn=generate_via_host(TEXTURE_HOST),
         )
         elapsed = time.perf_counter() - started
 
@@ -196,7 +193,7 @@ def run(interval_s: float, max_cycles: int | None) -> None:
         reason = f" -- {outcome['reason']}" if outcome.get("reason") else ""
         print(
             f"[{time.strftime('%H:%M:%S')}] {body_name:10s} gen={outcome['generation']:4d} "
-            f"host={host:9s} {move:20s} {verdict:8s} ({elapsed:.1f}s){reason}"
+            f"host={TEXTURE_HOST:9s} {move:20s} {verdict:8s} ({elapsed:.1f}s){reason}"
         )
 
         if outcome["accepted"]:
@@ -204,11 +201,11 @@ def run(interval_s: float, max_cycles: int | None) -> None:
             accepted_heightmap = textures.get(body_name, {}).get("heightmap")
             if accepted_heightmap is not None:
                 v_started = time.perf_counter()
-                validation = validate_on_other_host(body_name, candidate, accepted_heightmap, host)
+                validation = validate_repeat_run(body_name, candidate, accepted_heightmap)
                 v_elapsed = time.perf_counter() - v_started
                 if validation["validated"]:
                     print(
-                        f"    validated on {validation['host']} "
+                        f"    validated (repeat run on {validation['host']}) "
                         f"(max_diff={validation.get('max_diff', 0):.2e}, {v_elapsed:.1f}s)"
                     )
                 else:
