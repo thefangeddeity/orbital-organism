@@ -86,6 +86,150 @@ class NeuralLearner(Lego):
         self.last_evolution_result = None
         self.previous_observations = {}
 
+        # Code variant tracking: what loss, features, and activations are active
+        self.active_loss_variant = "mse"
+        self.active_feature_variant = "basic"
+        self.active_activation_variant = "relu"
+
+        # Track evolution genealogy
+        self.code_variants_tried = []
+        self.evolution_success_rate = 0.0
+
+    # ================================================================
+    # CODE VARIANT LIBRARY
+    # ================================================================
+    # Safe, pre-written loss functions, feature extractors, and
+    # activation functions that the organism can try.
+    # ================================================================
+
+    @staticmethod
+    def loss_mse(prediction, target):
+        """Mean Squared Error."""
+        error = prediction - target
+        return float(np.mean(error * error))
+
+    @staticmethod
+    def loss_mae(prediction, target):
+        """Mean Absolute Error."""
+        error = np.abs(prediction - target)
+        return float(np.mean(error))
+
+    @staticmethod
+    def loss_huber(prediction, target, delta=0.5):
+        """Huber loss: robust to outliers."""
+        error = prediction - target
+        abs_error = np.abs(error)
+        quadratic = np.minimum(abs_error, delta)
+        linear = abs_error - quadratic
+        return float(
+            np.mean(
+                0.5 * quadratic**2 + delta * linear
+            )
+        )
+
+    @staticmethod
+    def loss_weighted_mse(prediction, target):
+        """MSE with higher weight on larger displacements."""
+        error = prediction - target
+        magnitude = np.sqrt(np.sum(target**2, axis=1, keepdims=True))
+        weight = 1.0 + magnitude
+        return float(
+            np.mean(weight * (error**2))
+        )
+
+    # Feature variants
+    @staticmethod
+    def features_basic(x_au, y_au, ecc, a_au):
+        """Basic 4-element feature vector."""
+        return np.asarray(
+            [x_au, y_au, ecc, a_au / 2.0],
+            dtype=float,
+        )
+
+    @staticmethod
+    def features_extended(x_au, y_au, ecc, a_au):
+        """Extended features: add normalized position magnitude and eccentricity squared."""
+        r = np.sqrt(x_au**2 + y_au**2)
+        return np.asarray(
+            [
+                x_au,
+                y_au,
+                ecc,
+                a_au / 2.0,
+                r,
+                ecc**2,
+            ],
+            dtype=float,
+        )
+
+    @staticmethod
+    def features_phase_based(x_au, y_au, ecc, a_au):
+        """Phase-based: convert to angle + distance."""
+        r = np.sqrt(x_au**2 + y_au**2)
+        phase = np.arctan2(y_au, x_au)
+        return np.asarray(
+            [
+                np.sin(phase),
+                np.cos(phase),
+                r,
+                ecc,
+            ],
+            dtype=float,
+        )
+
+    # Activation variants
+    @staticmethod
+    def activation_relu(x):
+        return np.maximum(x, 0.0)
+
+    @staticmethod
+    def activation_tanh(x):
+        return np.tanh(x)
+
+    @staticmethod
+    def activation_gelu(x):
+        return x * (0.5 * (1.0 + np.tanh(
+            np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3)
+        )))
+
+    # Lookup dictionaries for variants
+    LOSS_VARIANTS = {
+        "mse": loss_mse,
+        "mae": loss_mae,
+        "huber": loss_huber,
+        "weighted_mse": loss_weighted_mse,
+    }
+
+    FEATURE_VARIANTS = {
+        "basic": features_basic,
+        "extended": features_extended,
+        "phase_based": features_phase_based,
+    }
+
+    ACTIVATION_VARIANTS = {
+        "relu": activation_relu,
+        "tanh": activation_tanh,
+        "gelu": activation_gelu,
+    }
+
+    def get_loss_function(self):
+        return self.LOSS_VARIANTS.get(
+            self.active_loss_variant,
+            self.LOSS_VARIANTS["mse"],
+        )
+
+    def get_feature_function(self):
+        return self.FEATURE_VARIANTS.get(
+            self.active_feature_variant,
+            self.FEATURE_VARIANTS["basic"],
+        )
+
+    def get_activation_function(self):
+        return self.ACTIVATION_VARIANTS.get(
+            self.active_activation_variant,
+            self.ACTIVATION_VARIANTS["relu"],
+        )
+
     def configure(self, parameters: dict[str, Any]) -> None:
         self.parameters.update(parameters)
 
@@ -160,20 +304,29 @@ class NeuralLearner(Lego):
 
         self.b3 = np.zeros(self.output_size)
 
-    @staticmethod
-    def _relu(x):
-        return np.maximum(x, 0.0)
-
-    @staticmethod
-    def _relu_grad(x):
-        return (x > 0.0).astype(float)
+    def _activation_gradient(self, x):
+        """Gradient of active activation function."""
+        if self.active_activation_variant == "tanh":
+            a = np.tanh(x)
+            return 1.0 - a**2
+        elif self.active_activation_variant == "gelu":
+            # Approximate GELU gradient
+            cdf = 0.5 * (1.0 + np.tanh(
+                np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3)
+            ))
+            pdf = np.exp(-0.5 * x**2) / np.sqrt(2.0 * np.pi)
+            return cdf + x * pdf * np.sqrt(2.0 / np.pi)
+        else:  # ReLU
+            return (x > 0.0).astype(float)
 
     def _forward(self, x):
+        activation = self.get_activation_function()
+
         z1 = x @ self.w1 + self.b1
-        a1 = self._relu(z1)
+        a1 = activation(z1)
 
         z2 = a1 @ self.w2 + self.b2
-        a2 = self._relu(z2)
+        a2 = activation(z2)
 
         y = a2 @ self.w3 + self.b3
 
@@ -363,6 +516,16 @@ class NeuralLearner(Lego):
         "decrease_hidden_width": ("hidden_width_delta", -1),
         "increase_batch_size": ("batch_size_delta", 4),
         "decrease_batch_size": ("batch_size_delta", -4),
+        "switch_loss_mse": ("active_loss_variant", "mse"),
+        "switch_loss_mae": ("active_loss_variant", "mae"),
+        "switch_loss_huber": ("active_loss_variant", "huber"),
+        "switch_loss_weighted": ("active_loss_variant", "weighted_mse"),
+        "switch_features_basic": ("active_feature_variant", "basic"),
+        "switch_features_extended": ("active_feature_variant", "extended"),
+        "switch_features_phase": ("active_feature_variant", "phase_based"),
+        "switch_activation_relu": ("active_activation_variant", "relu"),
+        "switch_activation_tanh": ("active_activation_variant", "tanh"),
+        "switch_activation_gelu": ("active_activation_variant", "gelu"),
         "noop": (None, 0),
     }
 
@@ -375,6 +538,36 @@ class NeuralLearner(Lego):
         import json
         with open(path, 'r') as f:
             return json.load(f)
+
+    def snapshot_state(self):
+        """Deep snapshot of network weights, parameters, and code variants."""
+        return {
+            "w1": self.w1.copy(),
+            "b1": self.b1.copy(),
+            "w2": self.w2.copy(),
+            "b2": self.b2.copy(),
+            "w3": self.w3.copy(),
+            "b3": self.b3.copy(),
+            "parameters": dict(self.parameters),
+            "active_loss_variant": self.active_loss_variant,
+            "active_feature_variant": self.active_feature_variant,
+            "active_activation_variant": self.active_activation_variant,
+            "validation_loss": self.validation_loss,
+        }
+
+    def restore_state(self, snapshot):
+        """Restore network weights, parameters, and code variants from snapshot."""
+        self.w1 = snapshot["w1"].copy()
+        self.b1 = snapshot["b1"].copy()
+        self.w2 = snapshot["w2"].copy()
+        self.b2 = snapshot["b2"].copy()
+        self.w3 = snapshot["w3"].copy()
+        self.b3 = snapshot["b3"].copy()
+        self.parameters = dict(snapshot["parameters"])
+        self.active_loss_variant = snapshot["active_loss_variant"]
+        self.active_feature_variant = snapshot["active_feature_variant"]
+        self.active_activation_variant = snapshot["active_activation_variant"]
+        self.validation_loss = snapshot["validation_loss"]
 
     def _initialize_self_program(self):
         path = (
@@ -398,7 +591,7 @@ class NeuralLearner(Lego):
         if not isinstance(commands, list):
             return False
 
-        if len(commands) > 4:
+        if len(commands) > 6:
             return False
 
         return all(
@@ -433,7 +626,7 @@ class NeuralLearner(Lego):
             if command != "noop":
                 candidate.append(command)
 
-            candidate = candidate[-4:]
+            candidate = candidate[-6:]
 
             if self.validate_self_program(candidate):
                 candidates.append(candidate)
@@ -444,34 +637,44 @@ class NeuralLearner(Lego):
         index = self.training_steps % len(candidates)
         return candidates[index]
 
-    def evaluate_candidate(self, candidate):
+    def evaluate_candidate_real(self, candidate):
+        """
+        Real transactional validation.
+
+        Snapshot current state, apply candidate mutations,
+        run a validation pass, measure actual loss.
+        If worse or on exception, rollback and return False.
+        """
         if not self.validate_self_program(candidate):
             return False, float("inf")
 
-        # The self-program is evaluated conservatively against the
-        # existing validation loss. No candidate gets to mutate the
-        # simulator or the neural architecture during evaluation.
         baseline = float(self.validation_loss)
 
-        simulated = baseline
+        # Take snapshot before mutation
+        snapshot = self.snapshot_state()
 
-        for command in candidate:
-            if command == "increase_learning_rate":
-                simulated *= 0.999
-            elif command == "decrease_learning_rate":
-                simulated *= 1.001
-            elif command == "increase_hidden_width":
-                simulated *= 0.998
-            elif command == "decrease_hidden_width":
-                simulated *= 1.002
-            elif command == "increase_batch_size":
-                simulated *= 0.9995
-            elif command == "decrease_batch_size":
-                simulated *= 1.0005
+        try:
+            # Apply candidate mutations
+            self.apply_self_program(candidate)
 
-        return simulated < baseline, simulated
+            # Run actual validation on real data
+            validation_loss = self._validation_loss()
+
+            if validation_loss >= baseline:
+                # No improvement: rollback
+                self.restore_state(snapshot)
+                return False, validation_loss
+
+            # Improved! Keep the mutations
+            return True, validation_loss
+
+        except Exception as e:
+            # Crash or numerical instability: rollback and reject
+            self.restore_state(snapshot)
+            return False, float("inf")
 
     def apply_self_program(self, commands):
+        """Apply mutations from accepted candidate program."""
         for command in commands:
             if command == "increase_learning_rate":
                 self.parameters["learning_rate"] *= 1.10
@@ -481,11 +684,17 @@ class NeuralLearner(Lego):
                 self.parameters["hidden_width"] = int(
                     self.parameters["hidden_width"] + 1
                 )
+                self.hidden_width = int(
+                    self.parameters["hidden_width"]
+                )
                 self._initialize_network()
             elif command == "decrease_hidden_width":
                 self.parameters["hidden_width"] = max(
                     4,
                     int(self.parameters["hidden_width"] - 1),
+                )
+                self.hidden_width = int(
+                    self.parameters["hidden_width"]
                 )
                 self._initialize_network()
             elif command == "increase_batch_size":
@@ -497,19 +706,38 @@ class NeuralLearner(Lego):
                     2,
                     int(self.parameters["batch_size"] - 4),
                 )
+            elif command.startswith("switch_loss_"):
+                loss_name = command.replace("switch_loss_", "")
+                if loss_name in self.LOSS_VARIANTS:
+                    self.active_loss_variant = loss_name
+            elif command.startswith("switch_features_"):
+                feature_name = command.replace("switch_features_", "")
+                if feature_name in self.FEATURE_VARIANTS:
+                    self.active_feature_variant = feature_name
+            elif command.startswith("switch_activation_"):
+                activation_name = command.replace("switch_activation_", "")
+                if activation_name in self.ACTIVATION_VARIANTS:
+                    self.active_activation_variant = activation_name
 
     def self_evolve(self):
+        """
+        Transactional evolution with real validation.
+
+        Generate candidate, apply mutations to a copy, validate on real data,
+        rollback if worse, commit if better.
+        """
         self._initialize_self_program()
 
         candidate = self.candidate_program()
-        accepted, score = self.evaluate_candidate(candidate)
+
+        # Real transactional validation
+        accepted, score = self.evaluate_candidate_real(candidate)
 
         current = self.load_self_program()
 
         if accepted:
             program = candidate
             accepted_count = 1
-            self.apply_self_program(candidate)
         else:
             program = current
             accepted_count = 0
@@ -525,6 +753,24 @@ class NeuralLearner(Lego):
             + accepted_count
         )
 
+        # Track genealogy
+        self.code_variants_tried.append({
+            "generation": generation,
+            "candidate": candidate,
+            "accepted": accepted,
+            "score": float(score),
+        })
+
+        # Keep genealogy bounded
+        if len(self.code_variants_tried) > 100:
+            del self.code_variants_tried[:-100]
+
+        # Update success rate
+        if total_accepted > 0:
+            self.evolution_success_rate = (
+                total_accepted / max(generation, 1)
+            )
+
         self._write_json(
             self.self_program_path,
             {
@@ -532,6 +778,9 @@ class NeuralLearner(Lego):
                 "generation": generation,
                 "accepted": total_accepted,
                 "last_score": float(score),
+                "success_rate": float(
+                    self.evolution_success_rate
+                ),
             },
         )
 
@@ -540,6 +789,9 @@ class NeuralLearner(Lego):
             "accepted": bool(accepted),
             "program": program,
             "score": float(score),
+            "baseline": float(
+                self.validation_loss
+            ),
         }
 
     # ================================================================
@@ -563,13 +815,10 @@ class NeuralLearner(Lego):
 
         prediction, cache = self._forward(x)
 
-        error = prediction - target
+        loss_fn = self.get_loss_function()
+        loss = loss_fn(prediction, target)
 
-        loss = float(
-            np.mean(
-                error * error
-            )
-        )
+        error = prediction - target
 
         x, z1, a1, z2, a2 = cache
 
@@ -590,7 +839,7 @@ class NeuralLearner(Lego):
         da2 = dy @ self.w3.T
         dz2 = (
             da2
-            * self._relu_grad(z2)
+            * self._activation_gradient(z2)
         )
 
         dw2 = a1.T @ dz2
@@ -602,7 +851,7 @@ class NeuralLearner(Lego):
         da1 = dz2 @ self.w2.T
         dz1 = (
             da1
-            * self._relu_grad(z1)
+            * self._activation_gradient(z1)
         )
 
         dw1 = x.T @ dz1
@@ -644,11 +893,8 @@ class NeuralLearner(Lego):
 
         prediction, _ = self._forward(x)
 
-        return float(
-            np.mean(
-                (prediction - target) ** 2
-            )
-        )
+        loss_fn = self.get_loss_function()
+        return loss_fn(prediction, target)
 
     def learn(self):
         if self.sim is None:
@@ -887,6 +1133,9 @@ class NeuralLearner(Lego):
             "cpu_training",
             "persistent_learning_state",
             "validation",
+            "self_evolution",
+            "code_mutation",
+            "transactional_rollback",
         ]
 
     def state(self) -> dict[str, Any]:
@@ -903,6 +1152,16 @@ class NeuralLearner(Lego):
                 ],
             "hidden_width":
                 self.hidden_width,
+            "active_loss_variant":
+                self.active_loss_variant,
+            "active_feature_variant":
+                self.active_feature_variant,
+            "active_activation_variant":
+                self.active_activation_variant,
+            "evolution_runs":
+                self.evolution_runs,
+            "evolution_success_rate":
+                self.evolution_success_rate,
         }
 
     def shutdown(self) -> None:
