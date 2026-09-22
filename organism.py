@@ -8,6 +8,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.patches import Circle, Rectangle
 
 MODULE_DIR = Path(__file__).resolve().parent / "modules"
 sys.path.insert(0, str(MODULE_DIR))
@@ -151,19 +152,16 @@ def main():
 
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
-    fig = plt.figure(figsize=(11, 8))
+    fig = plt.figure(figsize=(16, 9))
     fig.patch.set_facecolor("black")
 
-    # Dedicated figure margin for the organism dashboard.
-    # The dashboard is figure-relative, so it no longer covers
-    # the 3-D orbital world.
-    fig.subplots_adjust(
-        left=0.25,
-        right=0.98,
-        bottom=0.08,
-        top=0.93,
-    )
-    ax = fig.add_subplot(111, projection="3d")
+    # Three regions, explicitly positioned in figure-fraction coordinates
+    # rather than via subplots_adjust: left ~0-0.19 is the text dashboard
+    # (fig.text, no axes needed), middle is the 3-D world, right is the
+    # per-worker fleet panel (Tanzania today; Tina/Ariana can each get
+    # their own strip the same way once they're real).
+    ax = fig.add_axes([0.21, 0.05, 0.56, 0.88], projection="3d")
+    tanzania_ax = fig.add_axes([0.80, 0.05, 0.18, 0.88])
 
     # Persistent visual trails belong to the renderer, not the simulator.
     render_trails = {
@@ -223,9 +221,9 @@ def main():
 
         for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
             pane.set_facecolor((0.0, 0.0, 0.0, 1.0))
-            pane.set_edgecolor((*PHOSPHOR, 0.12))
+            pane.set_edgecolor((*PHOSPHOR, 0.05))
 
-        ax.grid(True, color=PHOSPHOR, alpha=0.15, linewidth=0.5)
+        ax.grid(True, color=PHOSPHOR, alpha=0.06, linewidth=0.4)
 
         ax.tick_params(colors=(*PHOSPHOR,))
 
@@ -240,6 +238,78 @@ def main():
         # real relative sizes (Jupiter dwarfing Mercury, etc.) show up
         # honestly instead of a make-believe uniform scale.
         return radius_km / sim.AU_KM
+
+    tanzania_provider = providers["tanzania"]
+    tanzania_cap_pct = float(
+        config.get("providers", {})
+        .get("tanzania", {})
+        .get("resource_cap_pct", 100)
+    )
+
+    def _render_tanzania_panel():
+        # Honest stub: Tanzania has no real transport yet, so this shows
+        # its true current state (offline, nothing dispatched) rather
+        # than fabricated activity. The moment dispatch() actually sends
+        # work there, this panel is where that shows up live.
+        tanzania_ax.clear()
+        tanzania_ax.set_facecolor("black")
+
+        for spine in tanzania_ax.spines.values():
+            spine.set_color((*PHOSPHOR, 0.2))
+
+        tanzania_ax.set_xticks([])
+        tanzania_ax.set_yticks([])
+        tanzania_ax.set_xlim(0, 1)
+        tanzania_ax.set_ylim(0, 1)
+
+        online = tanzania_provider.available()
+        status_color = (0.0, 1.0, 0.3) if online else (0.55, 0.15, 0.15)
+
+        tanzania_ax.add_patch(
+            Circle((0.10, 0.95), 0.028, color=status_color, zorder=3)
+        )
+        tanzania_ax.text(
+            0.20, 0.95, "TANZANIA",
+            color=PHOSPHOR, fontsize=10, family="monospace",
+            weight="bold", va="center",
+        )
+
+        info_lines = [
+            f"status: {'ONLINE' if online else 'OFFLINE'}",
+            f"role: {tanzania_provider.role or 'n/a'}",
+            f"addr: {tanzania_provider.address or 'unconfigured'}",
+            "",
+            "DISPATCH",
+            "  jobs sent: 0",
+            "  (running local-cpu",
+            "   until wired)",
+        ]
+
+        tanzania_ax.text(
+            0.06, 0.86, "\n".join(info_lines),
+            color=PHOSPHOR, fontsize=7.5, family="monospace",
+            va="top", alpha=0.8,
+        )
+
+        bar_y = 0.10
+        tanzania_ax.add_patch(
+            Rectangle(
+                (0.06, bar_y), 0.88, 0.035,
+                edgecolor=(*PHOSPHOR, 0.3), facecolor="none",
+            )
+        )
+        tanzania_ax.add_patch(
+            Rectangle(
+                (0.06, bar_y), 0.88 * (tanzania_cap_pct / 100.0), 0.035,
+                color=(*PHOSPHOR, 0.3),
+            )
+        )
+        tanzania_ax.text(
+            0.06, bar_y - 0.03,
+            f"resource cap: {tanzania_cap_pct:.0f}%",
+            color=PHOSPHOR, fontsize=7, family="monospace",
+            va="top", alpha=0.65,
+        )
 
     last = time.perf_counter()
 
@@ -357,6 +427,7 @@ def main():
 
             ax.clear()
             _apply_dark_theme(ax)
+            _render_tanzania_panel()
 
             # ----------------------------------------------------------
             # Orbital planes / paths.
