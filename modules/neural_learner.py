@@ -265,7 +265,10 @@ class NeuralLearner(Lego):
         means this particular mutation attempt is a no-op, same as any
         other candidate that doesn't pass evaluate_candidate_real().
         """
-        tree = scratch_blocks.random_candidate_tree(self.rng, max_ops=3)
+        tree = self._consume_offline_scratch_proposal()
+
+        if tree is None:
+            tree = scratch_blocks.random_candidate_tree(self.rng, max_ops=3)
 
         # A representative range of residuals to check the gradient
         # over, not the live batch -- this only needs to catch
@@ -284,6 +287,59 @@ class NeuralLearner(Lego):
 
         self.active_scratch_tree = tree
         return True
+
+    def _consume_offline_scratch_proposal(self) -> dict | None:
+        """
+        Picks up a tree left by tools/propose_scratch_tree.py, if a
+        fresh, unconsumed one is waiting. That tool runs offline
+        (against the real Gemini API when a key is configured, a local
+        best-of-N search otherwise), so its result can only ever reach
+        this live process by leaving state/ behind for a later cycle
+        to read -- never injected mid-flight, same rule dispatch_
+        tanzania.py's results follow.
+
+        Re-validated here regardless of what proposed it: an external
+        proposer's own say-so is never trusted, the same defense-in-
+        depth attach_simulator() applies when reloading a persisted
+        scratch_tree from self_program.json.
+
+        Marks the proposal consumed (not deleted) so its provenance --
+        which source produced it, when -- survives for later
+        inspection, and so a crash between reading and marking it
+        doesn't cause the same proposal to be silently skipped forever
+        (it would just be tried again next cycle, harmless either way).
+        """
+        if self.state_path is None:
+            return None
+
+        proposal_path = self.state_path.parent / "scratch_proposal.json"
+
+        try:
+            data = self._read_json(proposal_path)
+        except Exception:
+            return None
+
+        if not data or data.get("consumed"):
+            return None
+
+        tree = data.get("tree")
+        if tree is None:
+            return None
+
+        try:
+            scratch_blocks.validate(tree)
+        except scratch_blocks.InvalidBlockTree:
+            return None
+
+        data["consumed"] = True
+        try:
+            temp = proposal_path.with_suffix(".tmp")
+            temp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            temp.replace(proposal_path)
+        except OSError:
+            pass
+
+        return tree
 
     def _set_loss_weighting(self, weighting: str) -> None:
         current = loss_blocks.from_name(self.active_loss_variant)
