@@ -361,13 +361,25 @@ def main():
         online = tanzania_provider.available()
         status_color = (0.0, 1.0, 0.3) if online else (0.55, 0.15, 0.15)
 
-        tanzania_ax.add_patch(
-            Circle((0.10, 0.95), 0.028, color=status_color, zorder=3)
+        # A Circle patch draws in data coordinates -- on this panel's
+        # tall, narrow (non-square) axes that renders as a stretched
+        # ellipse, not a circle. A scatter marker sizes in points
+        # (screen units) instead, so it stays a true circle regardless
+        # of the axes' aspect ratio.
+        tanzania_ax.scatter(
+            [0.10], [0.95],
+            s=110, color=status_color, zorder=3,
+            transform=tanzania_ax.transData,
         )
         tanzania_ax.text(
             0.20, 0.95, "TANZANIA",
             color=PHOSPHOR, fontsize=10, family="monospace",
             weight="bold", va="center",
+        )
+        tanzania_ax.text(
+            0.20, 0.905, "Arch Linux · 8 CPU",
+            color=PHOSPHOR, fontsize=6.5, family="monospace",
+            va="center", alpha=0.55,
         )
 
         job_count, last_task = _tanzania_dispatch_history()
