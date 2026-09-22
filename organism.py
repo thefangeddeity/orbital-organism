@@ -7,11 +7,14 @@ import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 
 MODULE_DIR = Path(__file__).resolve().parent / "modules"
 sys.path.insert(0, str(MODULE_DIR))
 
 from modules.registry import ModuleRegistry
+from modules.organic_budget import OrganicBudget, FIDELITY_LEVELS
+from modules.compute_provider import build_providers
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -110,11 +113,28 @@ def main():
     for name in registry.active():
         print(f"  * {name}")
 
+    providers = build_providers(config)
+
     print()
     print("COMPUTE PROVIDERS")
-    print("  * local-cpu")
-    print("  o tanzania      disabled")
-    print("  o tina          disabled")
+
+    for provider_name, provider in providers.items():
+        marker = "*" if provider.available() else "o"
+        role = getattr(provider, "role", "coordinator + renderer")
+        print(f"  {marker} {provider_name:<12} {role}")
+
+    budget = OrganicBudget(
+        config.get("organic_budget", {}),
+        body_count=len(sim.PLANETS),
+    )
+
+    print()
+    print(
+        f"METABOLISM  fidelity=L{budget.fidelity_level} "
+        f"({FIDELITY_LEVELS[budget.fidelity_level]['name']})  "
+        f"cpu_cap={budget.max_cpu_ms_per_frame:.0f}ms  "
+        f"mem_cap={budget.max_memory_mb:.0f}MB"
+    )
 
     print()
     print("Starting organism.")
@@ -149,6 +169,49 @@ def main():
         body.name: []
         for body in sim.PLANETS
     }
+
+    # Manual zoom is a multiplier on the auto-fit cube extent computed
+    # every frame below, not a direct axis-limit write -- otherwise the
+    # per-frame auto-fit would silently undo any scroll zoom the instant
+    # the next frame drew.
+    camera_state = {"zoom_factor": 1.0}
+
+    def _on_scroll(event):
+        if event.button == "up":
+            camera_state["zoom_factor"] *= 0.9
+        elif event.button == "down":
+            camera_state["zoom_factor"] *= 1.1
+
+        camera_state["zoom_factor"] = max(
+            0.05,
+            min(20.0, camera_state["zoom_factor"]),
+        )
+
+    fig.canvas.mpl_connect("scroll_event", _on_scroll)
+
+    budget_visual_config = config.get("organic_budget", {})
+
+    def _sphere_mesh(cx, cy, cz, radius, resolution=10):
+        u = np.linspace(0, 2 * np.pi, resolution)
+        v = np.linspace(0, np.pi, resolution)
+        xs = cx + radius * np.outer(np.cos(u), np.sin(v))
+        ys = cy + radius * np.outer(np.sin(u), np.sin(v))
+        zs = cz + radius * np.outer(np.ones_like(u), np.cos(v))
+        return xs, ys, zs
+
+    def _visual_radius_au(radius_km):
+        # Bodies are astronomically tiny next to their orbits (Earth's
+        # radius is ~4e-5 AU). True-to-scale spheres would be invisible
+        # next to a multi-AU orbit, so this maps physical radius to a
+        # visible-but-honest size: scaled up, clamped to a sane range,
+        # monotonic so bigger planets still look bigger than smaller ones.
+        scale = float(budget_visual_config.get("body_visual_scale", 4000.0))
+        min_r = float(budget_visual_config.get("min_visual_radius_au", 0.012))
+        max_r = float(budget_visual_config.get("max_visual_radius_au", 0.06))
+
+        radius_au = (radius_km / sim.AU_KM) * scale
+
+        return max(min_r, min(max_r, radius_au))
 
     last = time.perf_counter()
 
@@ -185,9 +248,18 @@ def main():
             result = observer.observe(None)
 
             learning_result = None
+            upgrade_report = None
 
             if learner is not None:
+                evolution_runs_before = learner.evolution_runs
+
                 learning_result = learner.observe(None)
+
+                if learner.evolution_runs > evolution_runs_before:
+                    upgrade_report = budget.consider_upgrade(
+                        learner.evolution_runs,
+                        learner.best_loss,
+                    )
 
             bodies = result.observations["bodies"]
 
@@ -315,22 +387,83 @@ def main():
                 )
 
             # ----------------------------------------------------------
-            # Sun.
+            # Sun and planetary bodies.
+            #
+            # L0 renders bare dots (cheapest, current default). L1+
+            # renders true-radius spheres, mass-scaled -- earned via
+            # OrganicBudget, not assumed. This is the "inward" growth:
+            # the organism's own rendering complexity grows only when
+            # learning progress and machine budget both justify it.
             # ----------------------------------------------------------
 
-            ax.scatter(
-                [0],
-                [0],
-                [0],
-                s=130,
-                marker="o",
-            )
+            if budget.fidelity_level >= 1:
+
+                sun_radius_au = _visual_radius_au(sim.SUN.radius) * 3.0
+
+                sxs, sys_, szs = _sphere_mesh(
+                    0.0, 0.0, 0.0, sun_radius_au,
+                )
+
+                ax.plot_surface(
+                    sxs, sys_, szs,
+                    color="gold",
+                    linewidth=0,
+                    antialiased=False,
+                )
+
+                body_by_name = {
+                    body.name: body
+                    for body in sim.PLANETS
+                }
+
+                for name, position in positions_3d.items():
+
+                    x, y, z = position
+                    body = body_by_name.get(name)
+
+                    radius_au = _visual_radius_au(
+                        body.radius if body is not None else 6371.0
+                    )
+
+                    pxs, pys, pzs = _sphere_mesh(
+                        x, y, z, radius_au,
+                    )
+
+                    ax.plot_surface(
+                        pxs, pys, pzs,
+                        linewidth=0,
+                        antialiased=False,
+                    )
+
+                    ax.text(
+                        x + 0.035,
+                        y + 0.035,
+                        z + 0.035,
+                        name,
+                        fontsize=8,
+                    )
+
+                # Fidelity-rendered bodies handle their own labels above;
+                # the L0 scatter path below is skipped this frame.
+                positions_3d_for_scatter = {}
+
+            else:
+
+                ax.scatter(
+                    [0],
+                    [0],
+                    [0],
+                    s=130,
+                    marker="o",
+                )
+
+                positions_3d_for_scatter = positions_3d
 
             # ----------------------------------------------------------
-            # Current planetary bodies.
+            # Current planetary bodies (L0 scatter path).
             # ----------------------------------------------------------
 
-            for name, position in positions_3d.items():
+            for name, position in positions_3d_for_scatter.items():
 
                 x, y, z = position
 
@@ -390,7 +523,10 @@ def main():
                 0.5,
             )
 
-            cube_extent = max_extent + camera_pad
+            cube_extent = (
+                (max_extent + camera_pad)
+                * camera_state["zoom_factor"]
+            )
 
             ax.set_xlim(
                 -cube_extent,
@@ -456,9 +592,41 @@ def main():
             lines.extend([
                 "",
                 "COMPUTATION",
-                "  local-cpu: available",
-                "  Tanzania: disabled",
-                "  Tina: disabled",
+            ])
+
+            for provider_name, provider in providers.items():
+                status = "available" if provider.available() else "disabled"
+                lines.append(f"  {provider_name}: {status}")
+
+            budget_state = budget.state()
+
+            lines.extend([
+                "",
+                "METABOLISM",
+                (
+                    f"  fidelity: L{budget_state['fidelity_level']} "
+                    f"({budget_state['fidelity_name']})"
+                ),
+                (
+                    f"  cpu: {budget_state['cpu_ms']:.1f}/"
+                    f"{budget_state['cpu_cap_ms']:.0f}ms"
+                ),
+                (
+                    f"  mem: {budget_state['memory_mb']:.1f}/"
+                    f"{budget_state['memory_cap_mb']:.0f}MB"
+                ),
+                (
+                    f"  grown: {budget_state['upgrades_granted']}x  "
+                    f"denied: {budget_state['upgrades_denied']}x"
+                ),
+            ])
+
+            if budget.last_report.get("reason"):
+                lines.append(
+                    f"  last check: {budget.last_report['reason'][:38]}"
+                )
+
+            lines.extend([
                 "",
                 "LEARNING",
             ])
@@ -482,6 +650,22 @@ def main():
                     (
                         f"  width: "
                         f"{learner.hidden_width}"
+                    ),
+                    (
+                        f"  loss_fn: "
+                        f"{learner.active_loss_variant}"
+                    ),
+                    (
+                        f"  features: "
+                        f"{learner.active_feature_variant}"
+                    ),
+                    (
+                        f"  activation: "
+                        f"{learner.active_activation_variant}"
+                    ),
+                    (
+                        f"  gen: {learner.evolution_runs}  "
+                        f"success: {learner.evolution_success_rate:.1%}"
                     ),
                 ])
 
@@ -548,6 +732,14 @@ def main():
 
             fig.canvas.draw_idle()
             fig.canvas.flush_events()
+
+            frame_cpu_ms = (time.perf_counter() - now) * 1000.0
+            budget.record_frame_cost(frame_cpu_ms)
+
+            if upgrade_report and upgrade_report.get("granted"):
+                print()
+                print(f"[Organism] GREW -> {upgrade_report['reason']}")
+
             tick_count += 1
             if tick_count % 10 == 0:
                 print(f'\r[Organism] Tick {tick_count}...', end='', flush=True)

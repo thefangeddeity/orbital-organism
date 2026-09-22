@@ -36,19 +36,45 @@
         }
     },
 
+    "organic_budget": {
+        "fidelity_level": 0,
+        "max_fidelity_level": 3,
+        "budget_cpu_ms_per_frame": 30.0,
+        "budget_memory_mb": 256.0,
+        "upgrade_if_improvement_pct": 0.05,
+        "try_upgrade_every_n_generations": 10,
+        "body_visual_scale": 4000.0,
+        "min_visual_radius_au": 0.012,
+        "max_visual_radius_au": 0.06
+    },
+
     "providers": {
         "local_cpu": {
-            "enabled": true
+            "enabled": true,
+            "role": "coordinator + renderer",
+            "resource_cap_pct": 35
         },
 
         "tanzania": {
             "enabled": false,
-            "address": null
+            "address": null,
+            "role": "worker: training + code synthesis",
+            "resource_cap_pct": 100
         },
 
         "tina": {
             "enabled": false,
-            "address": null
+            "address": null,
+            "role": "worker: validation + backup",
+            "resource_cap_pct": 100
+        },
+
+        "ariana": {
+            "enabled": false,
+            "address": null,
+            "role": "opportunistic booster + archival",
+            "intermittent": true,
+            "resource_cap_pct": 80
         }
     }
 }
