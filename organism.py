@@ -242,10 +242,18 @@ def main():
         ax.set_facecolor("black")
 
         visible = grid_state["visible"]
-        edge_alpha = 0.03 if visible else 0.0
         grid_alpha = 0.10 if visible else 0.0
+        edge_alpha = 0.14 if visible else 0.0
 
         for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+            # mplot3d's pane is a Collection with its own artist-level
+            # alpha (0.5 by default) that silently overrides whatever
+            # alpha is embedded in set_facecolor/set_edgecolor's RGBA
+            # tuples -- confirmed by direct inspection. set_alpha(None)
+            # un-overrides it so the per-channel alphas below actually
+            # take effect; without this the box edges render at a fixed
+            # 0.5 alpha no matter what color is requested.
+            axis.pane.set_alpha(None)
             axis.pane.set_facecolor((0.0, 0.0, 0.0, 1.0))
             axis.pane.set_edgecolor((*PHOSPHOR, edge_alpha))
 
