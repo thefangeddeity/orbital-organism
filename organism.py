@@ -1046,101 +1046,75 @@ def main():
     # Drawn ONCE here, not inside the animation loop below: nothing here
     # changes without a fresh dispatch_brain_transplant.py run, so there
     # is nothing to redraw every frame.
-    BRAIN_TRANSPLANT_RESULTS_DIR = (
-        Path(__file__).resolve().parents[3] / "brain-transplant" / "results"
-    )
+    # body_builder.py (modules/) is the live, continuously-running
+    # counterpart -- tools/run_body_builder.py is meant to be started
+    # separately and left running for hours (see its own docstring),
+    # dispatching real work to Tanzania and updating state/
+    # body_builder.json/body_builder_history.json roughly once a
+    # minute. Unlike the brain-transplant panel this replaces (a
+    # static, one-shot result, still viewable via brain-transplant's
+    # own standalone visualize_result.py), this genuinely changes while
+    # the organism runs, so it's re-rendered periodically below, not
+    # just once at boot.
+    import body_builder
 
-    def _render_brain_transplant_panel():
+    def _render_body_builder_panel():
+        bottom_ax.clear()
         bottom_ax.set_facecolor(NAVY_BG)
         for spine in bottom_ax.spines.values():
             spine.set_color((*PHOSPHOR, 0.4))
-        bottom_ax.tick_params(colors=(*PHOSPHOR, 0.6), labelsize=FS_CAPTION)
-        bottom_ax.grid(color=(*PHOSPHOR, 0.10))
+        bottom_ax.set_xticks([])
+        bottom_ax.set_yticks([])
+        bottom_ax.set_xlim(0, 1)
+        bottom_ax.set_ylim(0, 1)
 
-        results = (
-            sorted(BRAIN_TRANSPLANT_RESULTS_DIR.glob("brain_transplant-*.json"))
-            if BRAIN_TRANSPLANT_RESULTS_DIR.exists() else []
+        state = body_builder.load_state()
+        bodies = state.get("bodies", {})
+
+        bottom_ax.text(
+            0.01, 0.92,
+            f"BODY-BUILDING "
+            f"(run tools/run_body_builder.py to grow bodies)",
+            color=PHOSPHOR, fontsize=FS_SUBHEAD, ha="left", va="top",
+            transform=bottom_ax.transAxes,
         )
 
-        if not results:
+        if not bodies:
             bottom_ax.text(
                 0.5, 0.5,
-                "BRAIN TRANSPLANT: no result yet -- run "
-                "brain-transplant/tools/dispatch_brain_transplant.py",
+                "no growth yet -- start tools/run_body_builder.py",
                 color=(*PHOSPHOR, 0.5), fontsize=FS_BODY,
                 ha="center", va="center", transform=bottom_ax.transAxes,
             )
             return
 
-        try:
-            data = json.loads(results[-1].read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        # Two columns so up to ~10 bodies fit without the panel growing
+        # taller than the space carved out for it.
+        names = sorted(bodies.keys())
+        rows_per_col = max(1, math.ceil(len(names) / 2))
+
+        for i, name in enumerate(names):
+            col = i // rows_per_col
+            row = i % rows_per_col
+            x = 0.01 + col * 0.5
+            y = 0.78 - row * 0.14
+
+            b = bodies[name]
+            params = b.get("current_params", {})
+            line = (
+                f"{name:<10s} gen={b.get('generation', 0):<4d} "
+                f"accepted={b.get('accepted', 0):<3d} "
+                f"{params.get('resolution', '?')}x{params.get('resolution', '?')} "
+                f"oct={params.get('octaves', '?')}"
+            )
             bottom_ax.text(
-                0.5, 0.5, "BRAIN TRANSPLANT: latest result unreadable",
-                color=(*PHOSPHOR, 0.5), fontsize=FS_BODY,
-                ha="center", va="center", transform=bottom_ax.transAxes,
-            )
-            return
-
-        ref = data.get("reference_shot", {})
-        ground_truth = ref.get("ground_truth_xy_km", [])
-        predicted_raw = ref.get("predicted_xy_km", [])
-
-        if ground_truth:
-            gt_x = [p[0] for p in ground_truth]
-            gt_y = [p[1] for p in ground_truth]
-            bottom_ax.plot(
-                gt_x, gt_y, color=PHOSPHOR, linewidth=1.5,
-                label="ground truth (real physics)",
+                x, y, line, color=(*PHOSPHOR, A_PRIMARY), fontsize=FS_BODY,
+                ha="left", va="top", family="monospace",
+                transform=bottom_ax.transAxes,
             )
 
-            # Same divergence-truncation reasoning as the standalone
-            # visualize_result.py: stop at the first point that's
-            # already many times the real trajectory's own scale, not
-            # just at the first NaN -- an intermediate 1e93 point one
-            # step before overflow is exactly as diverged as the inf
-            # itself and would blow out these axes just the same.
-            reference_scale = max(
-                (abs(v) for p in ground_truth for v in p), default=1.0
-            )
-            limit = max(reference_scale, 1.0) * 50.0
-            predicted_finite = []
-            for x, y in predicted_raw:
-                if not (math.isfinite(x) and math.isfinite(y)):
-                    break
-                if abs(x) > limit or abs(y) > limit:
-                    break
-                predicted_finite.append((x, y))
-
-            if predicted_finite:
-                px = [p[0] for p in predicted_finite]
-                py = [p[1] for p in predicted_finite]
-                bottom_ax.plot(
-                    px, py, color=(1.0, 0.65, 0.15), linewidth=1.2,
-                    linestyle="--",
-                    label=(
-                        "network rollout "
-                        f"(diverges @ step {len(predicted_finite)})"
-                    ),
-                )
-
-        bottom_ax.set_title(
-            f"BRAIN TRANSPLANT -- {data.get('domain', '?')}  "
-            f"(loss: {data.get('baseline_validation_loss', 0):.2g} -> "
-            f"{data.get('trained_validation_loss', 0):.2g} -> "
-            f"{data.get('final_validation_loss', 0):.2g}, "
-            f"{data.get('self_evolve_accepted', 0)}/"
-            f"{data.get('self_evolve_cycles', 0)} evolved)",
-            color=PHOSPHOR, fontsize=FS_SUBHEAD, loc="left",
-        )
-        bottom_ax.legend(
-            facecolor=NAVY_BG, edgecolor=(*PHOSPHOR, 0.3),
-            labelcolor=PHOSPHOR, fontsize=FS_CAPTION, loc="upper right",
-        )
-        bottom_ax.set_xlabel("downrange, km", color=PHOSPHOR, fontsize=FS_CAPTION)
-        bottom_ax.set_ylabel("altitude, km", color=PHOSPHOR, fontsize=FS_CAPTION)
-
-    _render_brain_transplant_panel()
+    _render_body_builder_panel()
+    last_body_builder_render = time.perf_counter()
 
     last = time.perf_counter()
     organism_born = time.perf_counter()
@@ -1781,6 +1755,15 @@ def main():
                         f"  L{budget.fidelity_level}"
                     )
                 print(f"\r{status}...", end="", flush=True)
+
+            # body_builder.json/body_builder_history.json only change
+            # roughly once a minute (tools/run_body_builder.py's own
+            # dispatch cadence) -- re-reading and redrawing every frame
+            # would be pure waste. 10s keeps the panel visibly live
+            # without it.
+            if time.perf_counter() - last_body_builder_render >= 10.0:
+                last_body_builder_render = time.perf_counter()
+                _render_body_builder_panel()
 
             time.sleep(0.03)
 

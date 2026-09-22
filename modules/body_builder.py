@@ -39,6 +39,8 @@ from typing import Any
 STATE_DIR = Path(__file__).resolve().parents[1] / "state"
 STATE_PATH = STATE_DIR / "body_builder.json"
 HISTORY_PATH = STATE_DIR / "body_builder_history.json"
+WORLD_TEXTURES_PATH = STATE_DIR / "world_textures.json"
+ORGANISM_CONFIG_PATH = STATE_DIR.parent / "organism.json"
 
 MAX_HISTORY = 200
 
@@ -120,6 +122,41 @@ def _log_history(entry: dict) -> None:
     _write_json(HISTORY_PATH, history)
 
 
+def _persist_accepted_heightmap(body_name: str, params: dict, heightmap) -> None:
+    """
+    An accepted candidate's real heightmap goes straight into
+    state/world_textures.json -- the SAME file organism.py's renderer
+    already reads for L2/L3 fidelity (see organism.py's
+    _load_world_textures()). This is the actual point of body-builder,
+    not a side effect: its real, continuously-improving output becomes
+    the organism's own texture fidelity directly, rather than sitting
+    in a separate file nothing else consumes. A rejected candidate's
+    heightmap is never written here -- only genuinely-accepted detail
+    should ever reach the renderer.
+    """
+    config = _read_json(ORGANISM_CONFIG_PATH, {})
+    world_mode = config.get("world", {}).get("mode", "solar_system")
+
+    data = _read_json(WORLD_TEXTURES_PATH, {})
+    if not isinstance(data, dict) or data.get("world_mode") != world_mode:
+        # A cache for a different world (or none yet) -- start fresh
+        # rather than mixing textures from two different worlds under
+        # one world_mode label.
+        data = {"world_mode": world_mode, "textures": {}}
+
+    # Per-body resolution, not a single top-level one -- organism.py's
+    # _load_world_textures() only ever reads each body's own
+    # tex["heightmap"] (via np.asarray, shape inferred directly), never
+    # a top-level "resolution"/"octaves" field, and different bodies
+    # legitimately evolve to different resolutions independently here.
+    data.setdefault("textures", {})[body_name] = {
+        "resolution": params["resolution"],
+        "heightmap": heightmap,
+    }
+
+    _write_json(WORLD_TEXTURES_PATH, data)
+
+
 def current_params(state: dict, body_name: str) -> dict:
     body_state = state.get("bodies", {}).get(body_name)
     if body_state is not None:
@@ -193,6 +230,7 @@ def evaluate_candidate(
         body_state["current_params"] = candidate_params
         body_state["best_detail_score"] = candidate_score
         body_state["accepted"] += 1
+        _persist_accepted_heightmap(body_name, candidate_params, heightmap)
 
     outcome = {
         "body": body_name, "generation": generation, "move": move_name,
