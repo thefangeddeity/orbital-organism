@@ -187,7 +187,7 @@ def main():
 
     dashboard_ax = fig.add_axes([0.015, PANEL_BOTTOM, 0.185, PANEL_HEIGHT])
     ax = fig.add_axes([0.21, PANEL_BOTTOM, 0.56, PANEL_HEIGHT], projection="3d")
-    tanzania_ax = fig.add_axes([0.80, PANEL_BOTTOM, 0.18, PANEL_HEIGHT])
+    right_ax = fig.add_axes([0.80, PANEL_BOTTOM, 0.18, PANEL_HEIGHT])
 
     PHOSPHOR = (0.0, 0.85, 1.0)
 
@@ -428,199 +428,283 @@ def main():
 
         return latest.name, data
 
-    def _render_tanzania_panel():
-        tanzania_ax.clear()
-        _style_2d_panel(tanzania_ax)
+    # The panel's physical aspect ratio, needed anywhere a shape has to
+    # stay visually circular: patches draw in DATA coordinates, and
+    # this panel is 2.88in wide x 7.92in tall, so equal data-space
+    # radii render as a stretched ellipse without this correction.
+    RIGHT_PANEL_ASPECT = (9 * PANEL_HEIGHT) / (16 * 0.18)
 
-        online = tanzania_provider.available()
-        # One hue, not a color-coded red/cyan switch -- online is full
-        # phosphor brightness, offline is the same phosphor dimmed.
-        status_color = (*PHOSPHOR, 0.9) if online else (*PHOSPHOR, 0.4)
-
-        # Sans-serif for the header, not monospace -- monospace stays
-        # reserved for tabular data below, where alignment matters.
-        # A heading in a terminal font is what made this read as a
-        # retro CRT rather than a designed HUD.
-        tanzania_ax.text(
-            0.05, 0.95, "TANZANIA",
+    def _render_brain_section(y_top):
+        """The organism itself: its live weight matrices."""
+        right_ax.text(
+            0.05, y_top, "BRAIN",
             color=PHOSPHOR, fontsize=11, weight="bold", va="center",
         )
-        # A bordered badge, not bare floating text -- otherwise it has
-        # nothing grounding it against the panel edge. Kept clear of
-        # the top-right corner bracket (which occupies roughly
-        # x=0.955-1.0) with real margin, and the text has actual
-        # padding from the box edge instead of nearly touching it.
-        badge_right = 0.90
-        badge_left = 0.62
-        tanzania_ax.add_patch(
+        _draw_separator(right_ax, y_top - 0.022)
+
+        if learner is None:
+            right_ax.text(
+                0.05, y_top - 0.06, "engine disabled",
+                color=PHOSPHOR, fontsize=7, family="monospace",
+                va="center", alpha=0.5,
+            )
+            return y_top - 0.10
+
+        # A graphical fingerprint of the actual network, not
+        # decoration -- same idea as SSH randomart: a dense, unique
+        # pattern deterministically generated from real data (here the
+        # live weight matrices), which visibly changes as the organism
+        # actually learns. Real values through a real colormap.
+        weight_matrices = [
+            ("W1", learner.w1),
+            ("W2", learner.w2),
+            ("W3", learner.w3),
+        ]
+
+        max_abs = max(
+            float(np.max(np.abs(w))) for _, w in weight_matrices
+        ) or 1.0
+        brain_norm = TwoSlopeNorm(vcenter=0.0, vmin=-max_abs, vmax=max_abs)
+
+        # W2 is the 24x24 bulk of the network; giving it proportionally
+        # more height than the thin 4x24 and 24x2 edge layers reflects
+        # what's actually there instead of three identical bands.
+        # Sized down from the first pass, which crowded the EXTENSIONS
+        # section below it -- these read fine small, and the panel
+        # needs the breathing room more than the pixels.
+        band_heights = [0.038, 0.080, 0.038]
+        label_gap = 0.020
+        band_gap = 0.018
+
+        y = y_top - 0.050
+
+        for (label, matrix), band_h in zip(weight_matrices, band_heights):
+            right_ax.text(
+                0.05, y,
+                f"{label}  {matrix.shape[0]}×{matrix.shape[1]}",
+                color=PHOSPHOR, fontsize=6, va="center", alpha=0.5,
+            )
+            y -= label_gap
+            right_ax.imshow(
+                matrix.T,
+                extent=[0.05, 0.95, y - band_h, y],
+                cmap=BRAIN_CMAP, norm=brain_norm,
+                aspect="auto", interpolation="nearest",
+            )
+            y -= band_h + band_gap
+
+        return y
+
+    def _render_extension_tanzania(y_top):
+        """One fleet extension. Tina/Ariana slot in the same way."""
+        online = tanzania_provider.available()
+        # One hue, not a red/cyan switch -- online is full phosphor
+        # brightness, offline is the same phosphor dimmed.
+        status_color = (*PHOSPHOR, 0.9) if online else (*PHOSPHOR, 0.4)
+
+        right_ax.text(
+            0.05, y_top, "TANZANIA",
+            color=PHOSPHOR, fontsize=9.5, weight="bold", va="center",
+        )
+
+        # Badge text is centered in its box on both axes. va="center"
+        # centers the full font bounding box, which sits slightly low
+        # for all-caps text with no descenders, so the label carries a
+        # small upward optical correction.
+        badge_left, badge_right = 0.60, 0.92
+        badge_bottom, badge_h = y_top - 0.019, 0.038
+        right_ax.add_patch(
             Rectangle(
-                (badge_left, 0.933), badge_right - badge_left, 0.036,
-                transform=tanzania_ax.transAxes,
-                edgecolor=(*status_color[:3], 0.7), facecolor=(*status_color[:3], 0.1),
+                (badge_left, badge_bottom), badge_right - badge_left, badge_h,
+                edgecolor=(*status_color[:3], 0.7),
+                facecolor=(*status_color[:3], 0.1),
                 linewidth=1.0,
             )
         )
-        tanzania_ax.text(
-            badge_right - 0.03, 0.951, "ONLINE" if online else "OFFLINE",
+        right_ax.text(
+            (badge_left + badge_right) / 2.0,
+            badge_bottom + badge_h / 2.0 + 0.0015,
+            "ONLINE" if online else "OFFLINE",
             color=status_color, fontsize=8, weight="bold",
-            va="center", ha="right",
+            ha="center", va="center",
         )
-        tanzania_ax.text(
-            0.05, 0.905, tanzania_provider.host_info,
+
+        y = y_top - 0.036
+        right_ax.text(
+            0.05, y, tanzania_provider.host_info,
             color=PHOSPHOR, fontsize=7, va="center", alpha=0.55,
         )
-        _draw_separator(tanzania_ax, 0.875)
 
         job_count, last_task = _tanzania_dispatch_history()
 
         info_lines = [
-            f"role: {tanzania_provider.role or 'n/a'}",
-            f"addr: {tanzania_provider.address or 'unconfigured'}",
+            f"{tanzania_provider.role or 'n/a'}",
             "",
-            "DISPATCH",
-            f"  jobs sent: {job_count}",
+            f"jobs sent: {job_count}",
         ]
-
         if last_task:
-            info_lines.append(f"  last: {last_task}")
+            info_lines.append(f"last: {last_task}")
         else:
-            info_lines.extend([
-                "  (none yet -- run",
-                "   tools/dispatch_tanzania.py)",
-            ])
+            info_lines.append("last: none yet")
 
-        tanzania_ax.text(
-            0.06, 0.86, "\n".join(info_lines),
-            color=PHOSPHOR, fontsize=7.5, family="monospace",
-            va="top", alpha=0.8,
+        y -= 0.028
+        right_ax.text(
+            0.05, y, "\n".join(info_lines),
+            color=PHOSPHOR, fontsize=7, family="monospace",
+            va="top", alpha=0.75,
         )
 
-        # Defrag-style block grid, but honest about what it can show:
-        # dispatch_tanzania.py runs as a single blocking SSH call from
-        # a separate process, with no channel to stream partial
-        # progress back mid-run -- there's no "live" to visualize.
-        # What IS real: every cell of the last completed sweep's
-        # results, colored by how good that combination actually
-        # scored. Grounded in real numbers already on disk, not a
-        # faked progress animation for work that can't be observed
-        # while it's happening.
+        return y - 0.10
+
+    def _render_sweep_grid(y_top):
+        # Honest about what it can show: dispatch_tanzania.py runs as a
+        # single blocking SSH call from a separate process, with no
+        # channel to stream partial progress back mid-run -- there is
+        # no "live" to visualize. What IS real: every cell of the last
+        # completed sweep, colored by how it actually scored.
         _, latest_result = _tanzania_latest_result()
 
-        if latest_result and latest_result.get("results"):
-            LOSS_ORDER = ["mse", "mae", "huber", "weighted_mse"]
-            ACTIVATION_ORDER = ["relu", "gelu", "tanh"]
+        if not (latest_result and latest_result.get("results")):
+            return y_top
 
-            scored = {
-                (r["loss_variant"], r["activation_variant"]): r["validation_loss"]
-                for r in latest_result["results"]
-                if math.isfinite(r["validation_loss"])
-            }
+        LOSS_ORDER = ["mse", "mae", "huber", "weighted_mse"]
+        ACTIVATION_ORDER = ["relu", "gelu", "tanh"]
 
-            if scored:
-                # Log scale: validation losses here span 4 orders of
-                # magnitude (0.07 to 1500+ isn't unusual once a bad
-                # activation/loss pairing diverges). A linear scale
-                # gets dominated by that one outlier and makes every
-                # reasonable combination look identically "best" --
-                # log spreads the real differences out meaningfully.
-                log_scored = {
-                    key: math.log(max(value, 1e-12))
-                    for key, value in scored.items()
-                }
-                lo = min(log_scored.values())
-                hi = max(log_scored.values())
-                span = (hi - lo) or 1.0
+        scored = {
+            (r["loss_variant"], r["activation_variant"]): r["validation_loss"]
+            for r in latest_result["results"]
+            if math.isfinite(r["validation_loss"])
+        }
 
-                # Enlarged from the first pass (cell_h 0.032 -> 0.06):
-                # the grid was floating in a mostly-empty lower panel
-                # with no relationship to the resource bar below it.
-                # Bigger cells give it real visual weight as the
-                # panel's centerpiece instead of reading as an
-                # afterthought.
-                grid_top = 0.53
-                grid_left = 0.06
-                cell_w = 0.88 / len(LOSS_ORDER)
-                cell_h = 0.06
-                gap = 0.008
+        if not scored:
+            return y_top
 
+        # Log scale: these losses span 4 orders of magnitude (0.07 to
+        # 1500+ once a bad pairing diverges). A linear scale gets
+        # dominated by the outlier and makes every reasonable
+        # combination look identically "best".
+        log_scored = {
+            key: math.log(max(value, 1e-12))
+            for key, value in scored.items()
+        }
+        lo = min(log_scored.values())
+        hi = max(log_scored.values())
+        span = (hi - lo) or 1.0
 
-                tanzania_ax.text(
-                    grid_left, grid_top + 0.05, "LAST SWEEP",
-                    color=PHOSPHOR, fontsize=6.5, family="monospace",
-                    alpha=0.55,
+        right_ax.text(
+            0.05, y_top, "LAST SWEEP",
+            color=PHOSPHOR, fontsize=7, weight="bold", va="center", alpha=0.7,
+        )
+
+        # Clearance below the label's own text height -- at 0.030 the
+        # first row was drawn straight through "LAST SWEEP".
+        grid_top = y_top - 0.042
+        grid_left = 0.05
+        cell_w = 0.90 / len(LOSS_ORDER)
+        cell_h = 0.036
+        gap = 0.006
+
+        for col, loss_name in enumerate(LOSS_ORDER):
+            for row, activation_name in enumerate(ACTIVATION_ORDER):
+                key = (loss_name, activation_name)
+                x = grid_left + col * cell_w
+                y = grid_top - row * (cell_h + gap)
+
+                if key in log_scored:
+                    # Rank within [0, 1]: 0 = worst, 1 = best.
+                    rank = 1.0 - (log_scored[key] - lo) / span
+
+                    if rank >= 0.5:
+                        t = (rank - 0.5) * 2.0
+                        color = (*PHOSPHOR, 0.35 + 0.5 * t)
+                    else:
+                        t = rank * 2.0
+                        color = (*GRID_WARN, 0.85 - 0.45 * t)
+                else:
+                    color = (0.3, 0.3, 0.3, 0.25)
+
+                right_ax.add_patch(
+                    Rectangle((x, y), cell_w - gap, cell_h, color=color)
                 )
 
-                for col, loss_name in enumerate(LOSS_ORDER):
-                    for row, activation_name in enumerate(ACTIVATION_ORDER):
-                        key = (loss_name, activation_name)
-                        x = grid_left + col * cell_w
-                        y = grid_top - row * (cell_h + gap)
+        # Horizontal, not rotated: rotated 5.5pt text was effectively
+        # unreadable, and these fit upright at this column width.
+        label_y = grid_top - len(ACTIVATION_ORDER) * (cell_h + gap) - 0.004
+        for col, loss_name in enumerate(LOSS_ORDER):
+            right_ax.text(
+                grid_left + col * cell_w + (cell_w - gap) / 2,
+                label_y, loss_name[:4],
+                color=PHOSPHOR, fontsize=6, family="monospace",
+                alpha=0.5, ha="center", va="top",
+            )
 
-                        if key in log_scored:
-                            # Rank within [0, 1]: 0 = worst, 1 = best.
-                            rank = 1.0 - (log_scored[key] - lo) / span
+        # The rows had no legend at all before -- the grid was
+        # unreadable without knowing what they meant.
+        right_ax.text(
+            grid_left, label_y - 0.024,
+            "rows: " + " / ".join(ACTIVATION_ORDER),
+            color=PHOSPHOR, fontsize=5.5, family="monospace",
+            alpha=0.4, va="top",
+        )
 
-                            if rank >= 0.5:
-                                t = (rank - 0.5) * 2.0
-                                color = (*PHOSPHOR, 0.35 + 0.5 * t)
-                            else:
-                                t = rank * 2.0
-                                color = (*GRID_WARN, 0.85 - 0.45 * t)
-                        else:
-                            color = (0.3, 0.3, 0.3, 0.25)
+        return label_y - 0.055
 
-                        tanzania_ax.add_patch(
-                            Rectangle(
-                                (x, y), cell_w - gap, cell_h,
-                                color=color,
-                            )
-                        )
-
-                for col, loss_name in enumerate(LOSS_ORDER):
-                    tanzania_ax.text(
-                        grid_left + col * cell_w + (cell_w - gap) / 2,
-                        grid_top - len(ACTIVATION_ORDER) * (cell_h + gap) - 0.005,
-                        loss_name[:4],
-                        color=PHOSPHOR, fontsize=5.5, family="monospace",
-                        alpha=0.5, ha="center", va="top", rotation=30,
-                    )
-
-        # Radial gauge instead of a flat bar, matching the reference
-        # HUDs' circular meters. Wedge/Circle patches draw in DATA
-        # coordinates -- on this panel's non-square axes (2.88in wide
-        # x 7.92in tall) that stretches a true circle into an ellipse,
-        # the exact bug already found and fixed once for the status
-        # dot. Compensated here by scaling the y-radius by the axes'
-        # actual physical aspect ratio so it renders as a true circle.
-        gauge_cx, gauge_cy = 0.5, 0.105
-        gauge_rx = 0.11
-        tanzania_aspect = (9 * PANEL_HEIGHT) / (16 * 0.18)
-        gauge_ry = gauge_rx / tanzania_aspect
+    def _render_resource_gauge(center_y):
+        gauge_cx = 0.5
+        gauge_rx = 0.105
+        gauge_ry = gauge_rx / RIGHT_PANEL_ASPECT
 
         theta_bg = np.linspace(0, 2 * np.pi, 120)
-        tanzania_ax.plot(
+        right_ax.plot(
             gauge_cx + gauge_rx * np.cos(theta_bg),
-            gauge_cy + gauge_ry * np.sin(theta_bg),
+            center_y + gauge_ry * np.sin(theta_bg),
             color=(*PHOSPHOR, 0.15), linewidth=4, solid_capstyle="round",
         )
 
         frac = max(0.0, min(1.0, tanzania_cap_pct / 100.0))
         theta_fg = np.linspace(np.pi / 2, np.pi / 2 - 2 * np.pi * frac, 100)
-        tanzania_ax.plot(
+        right_ax.plot(
             gauge_cx + gauge_rx * np.cos(theta_fg),
-            gauge_cy + gauge_ry * np.sin(theta_fg),
+            center_y + gauge_ry * np.sin(theta_fg),
             color=(*PHOSPHOR, 0.85), linewidth=4, solid_capstyle="round",
         )
 
-        tanzania_ax.text(
-            gauge_cx, gauge_cy, f"{tanzania_cap_pct:.0f}%",
+        right_ax.text(
+            gauge_cx, center_y + 0.0015, f"{tanzania_cap_pct:.0f}%",
             color=PHOSPHOR, fontsize=9, weight="bold",
             ha="center", va="center",
         )
-        tanzania_ax.text(
-            gauge_cx, gauge_cy - gauge_ry - 0.02, "RESOURCE CAP",
+        right_ax.text(
+            gauge_cx, center_y - gauge_ry - 0.016, "RESOURCE CAP",
             color=PHOSPHOR, fontsize=6, ha="center", va="top", alpha=0.5,
         )
+
+    def _render_right_panel():
+        right_ax.clear()
+        _style_2d_panel(right_ax)
+
+        brain_bottom = _render_brain_section(0.972)
+
+        # Flow from where the brain section actually ended rather than
+        # a guessed constant -- a hardcoded anchor put this header on
+        # top of the W3 heatmap. Band heights are fixed, so this is
+        # still deterministic frame to frame, just correct.
+        extensions_top = brain_bottom - 0.030
+        right_ax.text(
+            0.05, extensions_top, "EXTENSIONS",
+            color=PHOSPHOR, fontsize=11, weight="bold", va="center",
+        )
+        _draw_separator(right_ax, extensions_top - 0.022)
+
+        after_tanzania = _render_extension_tanzania(extensions_top - 0.055)
+        _render_sweep_grid(after_tanzania)
+        _render_resource_gauge(0.085)
+
+        # imshow autoscales the axes to the image extent; re-assert the
+        # panel's own coordinate frame so every later placement stays
+        # in the 0-1 space the rest of this function assumes.
+        right_ax.set_xlim(0, 1)
+        right_ax.set_ylim(0, 1)
 
     last = time.perf_counter()
     organism_born = time.perf_counter()
@@ -747,7 +831,7 @@ def main():
 
             ax.clear()
             _apply_dark_theme(ax)
-            _render_tanzania_panel()
+            _render_right_panel()
 
             # ----------------------------------------------------------
             # Orbital planes / paths.
@@ -1122,49 +1206,8 @@ def main():
                 va="top", alpha=0.8,
             )
 
-            # A graphical fingerprint of the actual network, not
-            # decoration -- same idea as SSH randomart: a dense,
-            # unique-looking pattern deterministically generated from
-            # real data (here, the live weight matrices), that visibly
-            # changes as the organism actually learns. Real values
-            # through a real colormap, not synthetic art.
-            if learner is not None:
-                _draw_separator(dashboard_ax, 0.30)
-                dashboard_ax.text(
-                    0.05, 0.285, "BRAIN",
-                    color=PHOSPHOR, fontsize=8, weight="bold", alpha=0.7,
-                )
-
-                weight_matrices = [
-                    ("W1", learner.w1),
-                    ("W2", learner.w2),
-                    ("W3", learner.w3),
-                ]
-
-                max_abs = max(
-                    float(np.max(np.abs(w))) for _, w in weight_matrices
-                ) or 1.0
-                brain_norm = TwoSlopeNorm(vcenter=0.0, vmin=-max_abs, vmax=max_abs)
-
-                band_top = 0.255
-                band_h = 0.058
-                band_gap = 0.028
-
-                for i, (label, matrix) in enumerate(weight_matrices):
-                    y1 = band_top - i * (band_h + band_gap)
-                    y0 = y1 - band_h
-
-                    dashboard_ax.text(
-                        0.05, y1 + 0.012,
-                        f"{label} ({matrix.shape[0]}x{matrix.shape[1]})",
-                        color=PHOSPHOR, fontsize=6, alpha=0.5,
-                    )
-                    dashboard_ax.imshow(
-                        matrix.T,
-                        extent=[0.05, 0.95, y0, y1],
-                        cmap=BRAIN_CMAP, norm=brain_norm,
-                        aspect="auto", interpolation="nearest",
-                    )
+            # BRAIN moved to the right panel, which had the room for
+            # it. This panel is now purely the numeric readout.
 
             fig.canvas.draw_idle()
             fig.canvas.flush_events()
@@ -1177,11 +1220,16 @@ def main():
                 verb = "GREW" if upgrade_report.get("granted") else "held"
                 print(f"[Organism] fidelity check ({verb}) -> {upgrade_report['reason']}")
 
-                if upgrade_report.get("granted"):
-                    # Earned growth is saved the instant it's earned, not
-                    # deferred to graceful shutdown -- a force-killed
-                    # process must not be able to un-earn it.
-                    budget.save_state()
+                # Save on EVERY completed check, not just granted ones.
+                # Growth needs two checks to happen: the first only
+                # establishes a loss baseline, the second compares
+                # against it. Saving only on grants meant that baseline
+                # lived in memory and died with any non-graceful exit,
+                # so a frequently-restarted organism could never reach
+                # the second check and would sit at "grown: 0x" forever
+                # -- which is exactly what state/organic_budget.json's
+                # "loss_at_last_check": null was recording.
+                budget.save_state()
 
             tick_count += 1
 
