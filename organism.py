@@ -1349,6 +1349,11 @@ def main():
                 (
                     f"  mem: {budget_state['memory_mb']:.1f}/"
                     f"{budget_state['memory_cap_mb']:.0f}MB"
+                    + (
+                        f" ({budget_state['memory_idle_multiplier']:.1f}x idle)"
+                        if budget_state["memory_idle_multiplier"] >= 1.05
+                        else ""
+                    )
                 ),
                 (
                     f"  grown: {budget_state['upgrades_granted']}x  "

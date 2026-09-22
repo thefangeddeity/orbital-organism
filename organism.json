@@ -43,13 +43,15 @@
     },
 
     "organic_budget": {
-        "_budget_note": "budget_cpu_ms_per_frame is a floor, not a ceiling -- when idle_aware_cpu_budget is true, the effective per-frame cap scales up toward budget_cpu_ms_per_frame * idle_cpu_multiplier_cap as the rest of the machine goes idle, and back down toward the floor when it's busy. See organic_budget.py's _idle_headroom_multiplier().",
+        "_budget_note": "budget_cpu_ms_per_frame and budget_memory_mb are floors, not ceilings -- when idle_aware_cpu_budget is true, the effective per-frame CPU cap scales up toward budget_cpu_ms_per_frame * idle_cpu_multiplier_cap as the rest of the machine goes idle, and the effective memory cap scales up toward budget_memory_mb * idle_memory_multiplier_cap based on real currently-available system RAM (capped to memory_safety_fraction of it, never more) -- both fall back to their floor when the machine is busy, or on this dev machine (7.7GB total, often ~90% used) when RAM is genuinely tight. See organic_budget.py's _idle_headroom_multiplier()/_idle_memory_multiplier().",
         "fidelity_level": 0,
         "max_fidelity_level": 3,
         "budget_cpu_ms_per_frame": 30.0,
         "budget_memory_mb": 256.0,
         "idle_aware_cpu_budget": true,
         "idle_cpu_multiplier_cap": 11,
+        "idle_memory_multiplier_cap": 4.0,
+        "memory_safety_fraction": 0.5,
         "upgrade_if_improvement_pct": 0.05,
         "try_upgrade_every_n_generations": 10
     },

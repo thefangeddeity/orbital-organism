@@ -98,6 +98,22 @@ class OrganicBudget:
             )
         )
 
+        # Same floor-not-ceiling treatment as CPU, mirrored for memory --
+        # but memory's real-time signal is "how much RAM is ACTUALLY
+        # free right now" (psutil.virtual_memory().available), not a
+        # static machine property like core count. A fixed "always
+        # allow 1GB" ceiling would be unsafe on a machine that's
+        # genuinely low on RAM, not just generous -- memory_safety_
+        # fraction caps this process to a conservative slice of
+        # whatever's currently free, same reasoning as never claiming
+        # the whole machine's idle CPU either.
+        self.idle_memory_multiplier_cap = float(
+            config.get("idle_memory_multiplier_cap", 4.0)
+        )
+        self.memory_safety_fraction = float(
+            config.get("memory_safety_fraction", 0.5)
+        )
+
         self.upgrade_improvement_threshold = float(
             config.get("upgrade_if_improvement_pct", 0.05)
         )
@@ -220,10 +236,38 @@ class OrganicBudget:
             return 0.0
         return 1.0 - (self.last_cpu_ms / cap)
 
+    def _idle_memory_multiplier(self) -> float:
+        """
+        How far above the memory floor this process may currently
+        claim, based on real system RAM availability right now --
+        psutil.virtual_memory().available, not a fixed ceiling. On the
+        machine this was developed on (7.7GB total, observed at 89.6%
+        used / 0.8GB available), a flat "always allow 1GB" cap would
+        have been unsafe, not just generous; this scales down with it
+        automatically the same way the CPU multiplier already does
+        when the machine gets busy.
+        """
+        if not self.idle_aware or psutil is None or self.max_memory_mb <= 0:
+            return 1.0
+
+        try:
+            available_mb = psutil.virtual_memory().available / (1024 * 1024)
+        except Exception:
+            return 1.0
+
+        safe_available_mb = available_mb * self.memory_safety_fraction
+        multiplier = safe_available_mb / self.max_memory_mb
+
+        return max(1.0, min(multiplier, self.idle_memory_multiplier_cap))
+
+    def effective_memory_cap_mb(self) -> float:
+        return self.max_memory_mb * self._idle_memory_multiplier()
+
     def memory_headroom_pct(self) -> float:
-        if self.max_memory_mb <= 0:
+        cap = self.effective_memory_cap_mb()
+        if cap <= 0:
             return 0.0
-        return 1.0 - (self.last_memory_mb / self.max_memory_mb)
+        return 1.0 - (self.last_memory_mb / cap)
 
     # ------------------------------------------------------------------
     # Growth decision
@@ -322,12 +366,14 @@ class OrganicBudget:
             self.last_report = report
             return report
 
-        if projected_mem > self.max_memory_mb:
+        effective_memory_cap = self.effective_memory_cap_mb()
+
+        if projected_mem > effective_memory_cap:
             self.upgrades_denied += 1
             report["reason"] = (
                 f"memory budget insufficient "
                 f"({projected_mem:.1f}MB projected > "
-                f"{self.max_memory_mb:.1f}MB cap)"
+                f"{effective_memory_cap:.1f}MB cap)"
             )
             self.last_report = report
             return report
@@ -356,7 +402,9 @@ class OrganicBudget:
             "cpu_cap_floor_ms": self.max_cpu_ms_per_frame,
             "cpu_idle_multiplier": multiplier,
             "memory_mb": self.last_memory_mb,
-            "memory_cap_mb": self.max_memory_mb,
+            "memory_cap_mb": self.effective_memory_cap_mb(),
+            "memory_cap_floor_mb": self.max_memory_mb,
+            "memory_idle_multiplier": self._idle_memory_multiplier(),
             "upgrades_granted": self.upgrades_granted,
             "upgrades_denied": self.upgrades_denied,
         }
