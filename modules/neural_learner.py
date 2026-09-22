@@ -989,7 +989,26 @@ class NeuralLearner(Lego):
         if not candidates:
             return ["noop"]
 
-        index = self.training_steps % len(candidates)
+        # NOT self.training_steps -- that advances by a near-constant
+        # ~424/generation (steps_per_cycle * evolution_interval +
+        # evaluate_candidate_real()'s own training bursts), and
+        # gcd(424, len(candidates)) trapped the cycle in a closed loop.
+        # Confirmed live with len(candidates)=28: only residues
+        # {0,4,8,...,24} were EVER reachable, permanently excluding 21
+        # of 28 commands -- including propose_scratch_core -- not
+        # rarely selecting them, never selecting them, for 1386+ real
+        # generations. self_program.json's generation count increments
+        # by exactly 1 every single call, so gcd(1, N) = 1 always --
+        # every command gets a fair turn every len(candidates)
+        # generations, immune to any such collision.
+        try:
+            generation = int(
+                self._read_json(self.self_program_path).get("generation", 0)
+            )
+        except Exception:
+            generation = self.training_steps  # unreadable state: degrade, don't crash
+
+        index = generation % len(candidates)
         return candidates[index]
 
     def _reference_score(self, batch=None):
