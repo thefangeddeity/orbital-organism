@@ -99,9 +99,15 @@ class RemoteProvider(ComputeProvider):
         self.enabled_in_config = enabled_in_config
 
         self._cached_available = False
+        self._cached_host_info: str | None = None
         self._check_in_progress = False
         self._last_check_time = 0.0
         self._lock = threading.Lock()
+
+    @property
+    def host_info(self) -> str:
+        with self._lock:
+            return self._cached_host_info or "checking..."
 
     def available(self) -> bool:
         if not self.enabled_in_config:
@@ -128,7 +134,23 @@ class RemoteProvider(ComputeProvider):
 
         return self._cached_available
 
+    # Single command, one SSH round-trip: reachability + whatever this
+    # host actually is. Written to work regardless of distro (falls
+    # back to "unknown" instead of assuming any particular OS) and
+    # regardless of hostname -- this same code runs for Tanzania, Tina,
+    # or Ariana, each showing its own real answer, not a value baked in
+    # for one specific machine.
+    _PROBE_COMMAND = (
+        "echo ok; "
+        "(grep -m1 '^PRETTY_NAME=' /etc/os-release 2>/dev/null "
+        " || uname -s) ; "
+        "nproc 2>/dev/null || echo '?'"
+    )
+
     def _check_reachability(self) -> None:
+        reachable = False
+        host_info = None
+
         try:
             result = subprocess.run(
                 [
@@ -136,18 +158,39 @@ class RemoteProvider(ComputeProvider):
                     "-o", f"ConnectTimeout={int(self.CHECK_TIMEOUT_SECONDS)}",
                     "-o", "BatchMode=yes",
                     self.name,
-                    "echo ok",
+                    self._PROBE_COMMAND,
                 ],
                 capture_output=True,
                 text=True,
                 timeout=self.CHECK_TIMEOUT_SECONDS + 2.0,
             )
-            reachable = result.returncode == 0 and "ok" in result.stdout
+
+            lines = result.stdout.strip().splitlines()
+            reachable = (
+                result.returncode == 0
+                and len(lines) >= 1
+                and lines[0] == "ok"
+            )
+
+            if reachable and len(lines) >= 3:
+                os_line = lines[1]
+
+                if os_line.startswith("PRETTY_NAME="):
+                    distro = os_line.split("=", 1)[1].strip().strip('"')
+                else:
+                    distro = os_line.strip() or "unknown OS"
+
+                cpu_count = lines[2].strip()
+
+                host_info = f"{distro} · {cpu_count} CPU"
+
         except Exception:
             reachable = False
 
         with self._lock:
             self._cached_available = reachable
+            if host_info is not None:
+                self._cached_host_info = host_info
             self._last_check_time = time.monotonic()
             self._check_in_progress = False
 

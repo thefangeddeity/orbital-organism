@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import sys
 import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.patches import Circle, Rectangle
+from matplotlib.patches import Rectangle
 
 MODULE_DIR = Path(__file__).resolve().parent / "modules"
 sys.path.insert(0, str(MODULE_DIR))
@@ -323,20 +324,23 @@ def main():
         Path(__file__).resolve().parent / "state" / "tanzania_results"
     )
 
-    def _tanzania_dispatch_history():
+    def _tanzania_result_files():
         # tools/dispatch_tanzania.py runs as a completely separate
         # process, out-of-band from this render loop -- the live
         # organism has no in-memory way to know a dispatch happened.
         # Its only record is the result files it writes to disk, so
-        # that's what this reads. A real count, not a running-total
-        # this process tracked itself.
+        # that's what everything here reads. Real history, not a
+        # running total this process tracked itself.
         if not tanzania_results_dir.exists():
-            return 0, None
+            return []
 
-        result_files = sorted(
+        return sorted(
             tanzania_results_dir.glob("*.json"),
             key=lambda p: p.stat().st_mtime,
         )
+
+    def _tanzania_dispatch_history():
+        result_files = _tanzania_result_files()
 
         if not result_files:
             return 0, None
@@ -345,6 +349,21 @@ def main():
         task_name = latest.stem.rsplit("-", 2)[0]
 
         return len(result_files), task_name
+
+    def _tanzania_latest_result():
+        result_files = _tanzania_result_files()
+
+        if not result_files:
+            return None, None
+
+        latest = result_files[-1]
+
+        try:
+            data = json.loads(latest.read_text(encoding="utf-8"))
+        except Exception:
+            return latest.name, None
+
+        return latest.name, data
 
     def _render_tanzania_panel():
         tanzania_ax.clear()
@@ -377,7 +396,7 @@ def main():
             weight="bold", va="center",
         )
         tanzania_ax.text(
-            0.20, 0.905, "Arch Linux · 8 CPU",
+            0.20, 0.905, tanzania_provider.host_info,
             color=PHOSPHOR, fontsize=6.5, family="monospace",
             va="center", alpha=0.55,
         )
@@ -406,6 +425,88 @@ def main():
             color=PHOSPHOR, fontsize=7.5, family="monospace",
             va="top", alpha=0.8,
         )
+
+        # Defrag-style block grid, but honest about what it can show:
+        # dispatch_tanzania.py runs as a single blocking SSH call from
+        # a separate process, with no channel to stream partial
+        # progress back mid-run -- there's no "live" to visualize.
+        # What IS real: every cell of the last completed sweep's
+        # results, colored by how good that combination actually
+        # scored. Grounded in real numbers already on disk, not a
+        # faked progress animation for work that can't be observed
+        # while it's happening.
+        _, latest_result = _tanzania_latest_result()
+
+        if latest_result and latest_result.get("results"):
+            LOSS_ORDER = ["mse", "mae", "huber", "weighted_mse"]
+            ACTIVATION_ORDER = ["relu", "gelu", "tanh"]
+
+            scored = {
+                (r["loss_variant"], r["activation_variant"]): r["validation_loss"]
+                for r in latest_result["results"]
+                if math.isfinite(r["validation_loss"])
+            }
+
+            if scored:
+                # Log scale: validation losses here span 4 orders of
+                # magnitude (0.07 to 1500+ isn't unusual once a bad
+                # activation/loss pairing diverges). A linear scale
+                # gets dominated by that one outlier and makes every
+                # reasonable combination look identically "best" --
+                # log spreads the real differences out meaningfully.
+                log_scored = {
+                    key: math.log(max(value, 1e-12))
+                    for key, value in scored.items()
+                }
+                lo = min(log_scored.values())
+                hi = max(log_scored.values())
+                span = (hi - lo) or 1.0
+
+                grid_top = 0.53
+                grid_left = 0.06
+                cell_w = 0.88 / len(LOSS_ORDER)
+                cell_h = 0.032
+                gap = 0.006
+
+                tanzania_ax.text(
+                    grid_left, grid_top + 0.03, "LAST SWEEP",
+                    color=PHOSPHOR, fontsize=6.5, family="monospace",
+                    alpha=0.55,
+                )
+
+                for col, loss_name in enumerate(LOSS_ORDER):
+                    for row, activation_name in enumerate(ACTIVATION_ORDER):
+                        key = (loss_name, activation_name)
+                        x = grid_left + col * cell_w
+                        y = grid_top - row * (cell_h + gap)
+
+                        if key in log_scored:
+                            # Rank within [0, 1]: 0 = worst, 1 = best.
+                            rank = 1.0 - (log_scored[key] - lo) / span
+                            color = (
+                                0.85 - 0.7 * rank,
+                                0.15 + 0.85 * rank,
+                                0.25,
+                                0.85,
+                            )
+                        else:
+                            color = (0.3, 0.3, 0.3, 0.25)
+
+                        tanzania_ax.add_patch(
+                            Rectangle(
+                                (x, y), cell_w - gap, cell_h,
+                                color=color,
+                            )
+                        )
+
+                for col, loss_name in enumerate(LOSS_ORDER):
+                    tanzania_ax.text(
+                        grid_left + col * cell_w + (cell_w - gap) / 2,
+                        grid_top - len(ACTIVATION_ORDER) * (cell_h + gap) - 0.005,
+                        loss_name[:4],
+                        color=PHOSPHOR, fontsize=5.5, family="monospace",
+                        alpha=0.5, ha="center", va="top", rotation=30,
+                    )
 
         bar_y = 0.10
         tanzania_ax.add_patch(
