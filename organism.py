@@ -391,30 +391,18 @@ def main():
         # alpha-blended system.
         status_color = (*PHOSPHOR, 0.9) if online else (0.8, 0.25, 0.25, 0.85)
 
-        # A Circle patch draws in data coordinates -- on this panel's
-        # tall, narrow (non-square) axes that renders as a stretched
-        # ellipse, not a circle. A scatter marker sizes in points
-        # (screen units) instead, so it stays a true circle regardless
-        # of the axes' aspect ratio.
-        tanzania_ax.scatter(
-            [0.10], [0.95],
-            s=90, color=status_color, zorder=3,
-            transform=tanzania_ax.transData,
-        )
         tanzania_ax.text(
-            0.20, 0.95, "TANZANIA",
+            0.05, 0.95, "TANZANIA",
             color=PHOSPHOR, fontsize=10, family="monospace",
             weight="bold", va="center",
         )
-        # A color-only dot makes the viewer decode red/green every
-        # time. Explicit text next to it removes the guesswork.
         tanzania_ax.text(
             0.95, 0.95, "ONLINE" if online else "OFFLINE",
             color=status_color, fontsize=7.5, family="monospace",
             weight="bold", va="center", ha="right",
         )
         tanzania_ax.text(
-            0.20, 0.905, tanzania_provider.host_info,
+            0.05, 0.905, tanzania_provider.host_info,
             color=PHOSPHOR, fontsize=6.5, family="monospace",
             va="center", alpha=0.55,
         )
