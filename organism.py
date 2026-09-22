@@ -1185,10 +1185,32 @@ def main():
         )
 
         surface = pygame.Surface(_cannon_viewport_px)
-        cannon_render.draw_scene(
-            surface, camera, cannon_gun.GRIBEAUVAL_12PDR, math.radians(45.0),
-            state, (), hud_values, _cannon_fonts,
-        )
+
+        # The HUD readout panel (elevation/charge/speed/... box) reads
+        # fine at cannon's normal full-screen size but dominates this
+        # small thumbnail and crowds out the actual scene -- the data
+        # it shows already lives on the left dashboard now anyway (see
+        # LOCAL-PHYSICS-BUILDER there). Suppressed by monkey-patching
+        # _draw_hud to a no-op for just this call, not deleted and not
+        # touching cannon's own source: SHOW_CANNON_HUD flips it back
+        # on if ever wanted.
+        SHOW_CANNON_HUD = False
+        if SHOW_CANNON_HUD:
+            cannon_render.draw_scene(
+                surface, camera, cannon_gun.GRIBEAUVAL_12PDR, math.radians(45.0),
+                state, (), hud_values, _cannon_fonts,
+            )
+        else:
+            real_draw_hud = cannon_render._draw_hud
+            cannon_render._draw_hud = lambda *args, **kwargs: None
+            try:
+                cannon_render.draw_scene(
+                    surface, camera, cannon_gun.GRIBEAUVAL_12PDR, math.radians(45.0),
+                    state, (), hud_values, _cannon_fonts,
+                )
+            finally:
+                cannon_render._draw_hud = real_draw_hud
+
         # pygame surfarray is (width, height, 3) -- imshow wants
         # (height, width, 3).
         return np.transpose(pygame.surfarray.array3d(surface), (1, 0, 2))
