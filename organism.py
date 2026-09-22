@@ -9,6 +9,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
 from matplotlib.patches import Rectangle
 
 MODULE_DIR = Path(__file__).resolve().parent / "modules"
@@ -165,15 +166,21 @@ def main():
 
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
+    # Sci-fi HUD palette, not retro terminal: dark navy (not flat black)
+    # + cyan accent (not phosphor green), matching the reference mood
+    # boards -- flat black + pure green read as a 1980s CRT, which
+    # wasn't the intent. Matplotlib can't do true glow/bloom or custom
+    # vector iconography, so this targets what's actually achievable:
+    # palette, angled corner-bracket framing, and a radial gauge,
+    # not a pixel-identical recreation of a game HUD.
+    NAVY_BG = (0.02, 0.045, 0.09)
+
     fig = plt.figure(figsize=(16, 9))
-    fig.patch.set_facecolor("black")
+    fig.patch.set_facecolor(NAVY_BG)
 
     # Shared layout system: every panel uses the same top/bottom bounds
-    # and the same framed-black-box-with-phosphor-border treatment, so
-    # the window reads as one composed design instead of three
-    # independently-styled boxes (dashboard used to be a bare fig.text()
-    # with matplotlib's default bbox -- an opaque steel-blue rectangle
-    # that matched nothing else in the window).
+    # and the same framed treatment, so the window reads as one
+    # composed design instead of three independently-styled boxes.
     PANEL_BOTTOM = 0.05
     PANEL_TOP = 0.93
     PANEL_HEIGHT = PANEL_TOP - PANEL_BOTTOM
@@ -182,16 +189,57 @@ def main():
     ax = fig.add_axes([0.21, PANEL_BOTTOM, 0.56, PANEL_HEIGHT], projection="3d")
     tanzania_ax = fig.add_axes([0.80, PANEL_BOTTOM, 0.18, PANEL_HEIGHT])
 
-    PHOSPHOR = (0.0, 1.0, 0.45)
+    PHOSPHOR = (0.0, 0.85, 1.0)
+
+    def _draw_corner_brackets(panel_ax, size=0.045, alpha=0.7, linewidth=1.4):
+        # Angled L-shaped corner brackets, not a plain rectangle border
+        # -- the one framing device every reference image shares.
+        corners = [
+            (0.0, 0.0, 1, 1),
+            (1.0, 0.0, -1, 1),
+            (0.0, 1.0, 1, -1),
+            (1.0, 1.0, -1, -1),
+        ]
+        for cx, cy, dx, dy in corners:
+            panel_ax.plot(
+                [cx, cx + dx * size], [cy, cy],
+                color=(*PHOSPHOR, alpha), linewidth=linewidth,
+                transform=panel_ax.transAxes, clip_on=False, solid_capstyle="butt",
+            )
+            panel_ax.plot(
+                [cx, cx], [cy, cy + dy * size],
+                color=(*PHOSPHOR, alpha), linewidth=linewidth,
+                transform=panel_ax.transAxes, clip_on=False, solid_capstyle="butt",
+            )
+
+    def _draw_separator(panel_ax, y, alpha=0.22):
+        panel_ax.plot(
+            [0.05, 0.95], [y, y],
+            color=(*PHOSPHOR, alpha), linewidth=0.6,
+            transform=panel_ax.transAxes,
+        )
 
     def _style_2d_panel(panel_ax):
-        panel_ax.set_facecolor("black")
+        panel_ax.set_facecolor(NAVY_BG)
         for spine in panel_ax.spines.values():
-            spine.set_color((*PHOSPHOR, 0.2))
+            spine.set_color((*PHOSPHOR, 0.12))
         panel_ax.set_xticks([])
         panel_ax.set_yticks([])
         panel_ax.set_xlim(0, 1)
         panel_ax.set_ylim(0, 1)
+        _draw_corner_brackets(panel_ax)
+
+    # Diverging scale anchored at a midpoint, not a direct RGB blend
+    # between the two endpoint hues -- cyan and red are near-
+    # complementary, so linearly blending them passes straight through
+    # a muddy gray at the midpoint (confirmed by rendering and
+    # inspecting the actual output). Used for both the Tanzania sweep
+    # grid and the weight heatmaps below, so "warm = bad/negative,
+    # cyan = good/positive" reads as one consistent visual language.
+    GRID_WARN = (0.85, 0.25, 0.2)
+    BRAIN_CMAP = LinearSegmentedColormap.from_list(
+        "brain", [GRID_WARN, NAVY_BG, PHOSPHOR],
+    )
 
     # Persistent visual trails belong to the renderer, not the simulator.
     render_trails = {
@@ -281,7 +329,7 @@ def main():
     def _apply_dark_theme(ax):
         # ax.clear() resets these every frame, so this must be re-applied
         # every frame too -- not just once at setup.
-        ax.set_facecolor("black")
+        ax.set_facecolor(NAVY_BG)
 
         visible = grid_state["visible"]
         grid_alpha = 0.10 if visible else 0.0
@@ -296,7 +344,7 @@ def main():
             # take effect; without this the box edges render at a fixed
             # 0.5 alpha no matter what color is requested.
             axis.pane.set_alpha(None)
-            axis.pane.set_facecolor((0.0, 0.0, 0.0, 1.0))
+            axis.pane.set_facecolor((*NAVY_BG, 1.0))
             axis.pane.set_edgecolor((*PHOSPHOR, edge_alpha))
 
             # mplot3d hardcodes '#b0b0b0' in the pane's private _axinfo
@@ -391,21 +439,34 @@ def main():
         # alpha-blended system.
         status_color = (*PHOSPHOR, 0.9) if online else (0.8, 0.25, 0.25, 0.85)
 
+        # Sans-serif for the header, not monospace -- monospace stays
+        # reserved for tabular data below, where alignment matters.
+        # A heading in a terminal font is what made this read as a
+        # retro CRT rather than a designed HUD.
         tanzania_ax.text(
             0.05, 0.95, "TANZANIA",
-            color=PHOSPHOR, fontsize=10, family="monospace",
-            weight="bold", va="center",
+            color=PHOSPHOR, fontsize=11, weight="bold", va="center",
+        )
+        # A bordered badge, not bare floating text -- otherwise it has
+        # nothing grounding it against the panel edge.
+        tanzania_ax.add_patch(
+            Rectangle(
+                (0.73, 0.935), 0.24, 0.032,
+                transform=tanzania_ax.transAxes,
+                edgecolor=(*status_color[:3], 0.7), facecolor=(*status_color[:3], 0.12),
+                linewidth=1.0,
+            )
         )
         tanzania_ax.text(
-            0.95, 0.95, "ONLINE" if online else "OFFLINE",
-            color=status_color, fontsize=7.5, family="monospace",
-            weight="bold", va="center", ha="right",
+            0.95, 0.951, "ONLINE" if online else "OFFLINE",
+            color=status_color, fontsize=8, weight="bold",
+            va="center", ha="right",
         )
         tanzania_ax.text(
             0.05, 0.905, tanzania_provider.host_info,
-            color=PHOSPHOR, fontsize=6.5, family="monospace",
-            va="center", alpha=0.55,
+            color=PHOSPHOR, fontsize=7, va="center", alpha=0.55,
         )
+        _draw_separator(tanzania_ax, 0.875)
 
         job_count, last_task = _tanzania_dispatch_history()
 
@@ -479,11 +540,6 @@ def main():
                 cell_h = 0.06
                 gap = 0.008
 
-                # Worst-to-best interpolates within the phosphor family
-                # (dim red -> full phosphor green) instead of arbitrary
-                # RGB math, so this grid reads as the same visual
-                # system as the status dot and everything else here.
-                GRID_WORST = (0.75, 0.2, 0.2)
 
                 tanzania_ax.text(
                     grid_left, grid_top + 0.05, "LAST SWEEP",
@@ -500,10 +556,13 @@ def main():
                         if key in log_scored:
                             # Rank within [0, 1]: 0 = worst, 1 = best.
                             rank = 1.0 - (log_scored[key] - lo) / span
-                            color = tuple(
-                                GRID_WORST[i] + (PHOSPHOR[i] - GRID_WORST[i]) * rank
-                                for i in range(3)
-                            ) + (0.85,)
+
+                            if rank >= 0.5:
+                                t = (rank - 0.5) * 2.0
+                                color = (*PHOSPHOR, 0.35 + 0.5 * t)
+                            else:
+                                t = rank * 2.0
+                                color = (*GRID_WARN, 0.85 - 0.45 * t)
                         else:
                             color = (0.3, 0.3, 0.3, 0.25)
 
@@ -523,24 +582,41 @@ def main():
                         alpha=0.5, ha="center", va="top", rotation=30,
                     )
 
-        bar_y = 0.15
-        tanzania_ax.add_patch(
-            Rectangle(
-                (0.06, bar_y), 0.88, 0.035,
-                edgecolor=(*PHOSPHOR, 0.3), facecolor="none",
-            )
+        # Radial gauge instead of a flat bar, matching the reference
+        # HUDs' circular meters. Wedge/Circle patches draw in DATA
+        # coordinates -- on this panel's non-square axes (2.88in wide
+        # x 7.92in tall) that stretches a true circle into an ellipse,
+        # the exact bug already found and fixed once for the status
+        # dot. Compensated here by scaling the y-radius by the axes'
+        # actual physical aspect ratio so it renders as a true circle.
+        gauge_cx, gauge_cy = 0.5, 0.105
+        gauge_rx = 0.11
+        tanzania_aspect = (9 * PANEL_HEIGHT) / (16 * 0.18)
+        gauge_ry = gauge_rx / tanzania_aspect
+
+        theta_bg = np.linspace(0, 2 * np.pi, 120)
+        tanzania_ax.plot(
+            gauge_cx + gauge_rx * np.cos(theta_bg),
+            gauge_cy + gauge_ry * np.sin(theta_bg),
+            color=(*PHOSPHOR, 0.15), linewidth=4, solid_capstyle="round",
         )
-        tanzania_ax.add_patch(
-            Rectangle(
-                (0.06, bar_y), 0.88 * (tanzania_cap_pct / 100.0), 0.035,
-                color=(*PHOSPHOR, 0.3),
-            )
+
+        frac = max(0.0, min(1.0, tanzania_cap_pct / 100.0))
+        theta_fg = np.linspace(np.pi / 2, np.pi / 2 - 2 * np.pi * frac, 100)
+        tanzania_ax.plot(
+            gauge_cx + gauge_rx * np.cos(theta_fg),
+            gauge_cy + gauge_ry * np.sin(theta_fg),
+            color=(*PHOSPHOR, 0.85), linewidth=4, solid_capstyle="round",
+        )
+
+        tanzania_ax.text(
+            gauge_cx, gauge_cy, f"{tanzania_cap_pct:.0f}%",
+            color=PHOSPHOR, fontsize=9, weight="bold",
+            ha="center", va="center",
         )
         tanzania_ax.text(
-            0.06, bar_y - 0.03,
-            f"resource cap: {tanzania_cap_pct:.0f}%",
-            color=PHOSPHOR, fontsize=7, family="monospace",
-            va="top", alpha=0.65,
+            gauge_cx, gauge_cy - gauge_ry - 0.02, "RESOURCE CAP",
+            color=PHOSPHOR, fontsize=6, ha="center", va="top", alpha=0.5,
         )
 
     last = time.perf_counter()
@@ -902,8 +978,8 @@ def main():
             ax.set_zlabel("Z (AU)")
 
             ax.set_title(
-                "ORBITAL ORGANISM - CONTINUOUS 3-D WORLD",
-                color=PHOSPHOR,
+                "ORBITAL ORGANISM — CONTINUOUS 3-D WORLD",
+                color=PHOSPHOR, fontsize=13, weight="bold",
             )
 
             # ----------------------------------------------------------
@@ -924,14 +1000,13 @@ def main():
 
             dashboard_ax.text(
                 0.05, 0.96, "ORGANISM",
-                color=PHOSPHOR, fontsize=10, family="monospace",
-                weight="bold", va="center",
+                color=PHOSPHOR, fontsize=11, weight="bold", va="center",
             )
             dashboard_ax.text(
                 0.05, 0.93, f"age {_format_age(age_seconds)} · {learning_state}",
-                color=PHOSPHOR, fontsize=6.5, family="monospace",
-                va="center", alpha=0.55,
+                color=PHOSPHOR, fontsize=7, va="center", alpha=0.55,
             )
+            _draw_separator(dashboard_ax, 0.905)
 
             # The real signal -- is it learning, is it improving --
             # comes first. Static facts that never change for the life
@@ -1043,6 +1118,50 @@ def main():
                 color=PHOSPHOR, fontsize=7.5, family="monospace",
                 va="top", alpha=0.8,
             )
+
+            # A graphical fingerprint of the actual network, not
+            # decoration -- same idea as SSH randomart: a dense,
+            # unique-looking pattern deterministically generated from
+            # real data (here, the live weight matrices), that visibly
+            # changes as the organism actually learns. Real values
+            # through a real colormap, not synthetic art.
+            if learner is not None:
+                _draw_separator(dashboard_ax, 0.30)
+                dashboard_ax.text(
+                    0.05, 0.285, "BRAIN",
+                    color=PHOSPHOR, fontsize=8, weight="bold", alpha=0.7,
+                )
+
+                weight_matrices = [
+                    ("W1", learner.w1),
+                    ("W2", learner.w2),
+                    ("W3", learner.w3),
+                ]
+
+                max_abs = max(
+                    float(np.max(np.abs(w))) for _, w in weight_matrices
+                ) or 1.0
+                brain_norm = TwoSlopeNorm(vcenter=0.0, vmin=-max_abs, vmax=max_abs)
+
+                band_top = 0.255
+                band_h = 0.058
+                band_gap = 0.028
+
+                for i, (label, matrix) in enumerate(weight_matrices):
+                    y1 = band_top - i * (band_h + band_gap)
+                    y0 = y1 - band_h
+
+                    dashboard_ax.text(
+                        0.05, y1 + 0.012,
+                        f"{label} ({matrix.shape[0]}x{matrix.shape[1]})",
+                        color=PHOSPHOR, fontsize=6, alpha=0.5,
+                    )
+                    dashboard_ax.imshow(
+                        matrix.T,
+                        extent=[0.05, 0.95, y0, y1],
+                        cmap=BRAIN_CMAP, norm=brain_norm,
+                        aspect="auto", interpolation="nearest",
+                    )
 
             fig.canvas.draw_idle()
             fig.canvas.flush_events()
