@@ -237,14 +237,22 @@ def main():
     )
     right_ax = fig.add_axes([0.80, PANEL_BOTTOM, 0.18, PANEL_HEIGHT])
 
-    # Split in two: body-builder (visual fidelity, Tina) on the left,
-    # local-physics-builder (real ballistics training, Tanzania) on the
-    # right -- two different growth loops, two different panels, not
-    # one crowded one.
+    # Three panels across the bottom: body-builder gets two (a real
+    # sphere "planet view" and the raw flat heightmap side by side --
+    # the sphere alone doesn't show the actual generated data, the flat
+    # image alone doesn't read as a planet), local-physics-builder gets
+    # the remaining half for cannon's own scene.
     BOTTOM_GAP = 0.02
     BOTTOM_HALF_WIDTH = (0.56 - BOTTOM_GAP) / 2.0
-    bottom_left_ax = fig.add_axes(
-        [0.21, PANEL_BOTTOM, BOTTOM_HALF_WIDTH, BOTTOM_PANEL_HEIGHT - 0.03],
+    BOTTOM_QUARTER_WIDTH = (BOTTOM_HALF_WIDTH - BOTTOM_GAP) / 2.0
+
+    bottom_body_ax = fig.add_axes(
+        [0.21, PANEL_BOTTOM, BOTTOM_QUARTER_WIDTH, BOTTOM_PANEL_HEIGHT - 0.03],
+        projection="3d",
+    )
+    bottom_surface_ax = fig.add_axes(
+        [0.21 + BOTTOM_QUARTER_WIDTH + BOTTOM_GAP, PANEL_BOTTOM,
+         BOTTOM_QUARTER_WIDTH, BOTTOM_PANEL_HEIGHT - 0.03],
     )
     bottom_right_ax = fig.add_axes(
         [0.21 + BOTTOM_HALF_WIDTH + BOTTOM_GAP, PANEL_BOTTOM,
@@ -1092,27 +1100,31 @@ def main():
 
     def _render_body_builder_panel():
         """
-        Read-only visual: the actual generated heightmap for whichever
-        body has grown the most (most accepted candidates), straight
-        from state/world_textures.json -- the same file organism.py's
-        own L2/L3 renderer reads. Numeric progress lives on the left
-        dashboard now, not here.
+        Two read-only views of the SAME data, side by side: a real
+        displaced+tinted sphere (bottom_body_ax -- what this actually
+        looks like as a body, reusing the exact facecolor/displacement
+        helpers organism.py's own L2/L3 renderer uses above) and the
+        raw flat heightmap (bottom_surface_ax -- the actual generated
+        numbers, not yet mapped onto anything). Neither alone was
+        enough: the sphere doesn't show the real data, the flat image
+        doesn't read as a body. Both for whichever body has grown the
+        most (most accepted candidates). Numeric progress lives on the
+        left dashboard, not here.
         """
-        bottom_left_ax.clear()
-        bottom_left_ax.set_xticks([])
-        bottom_left_ax.set_yticks([])
-        for spine in bottom_left_ax.spines.values():
-            spine.set_color((*PHOSPHOR, 0.4))
+        for panel_ax in (bottom_body_ax, bottom_surface_ax):
+            panel_ax.clear()
 
         state = body_builder.load_state()
         bodies = state.get("bodies", {})
 
         if not bodies:
-            bottom_left_ax.set_facecolor(NAVY_BG)
-            bottom_left_ax.text(
+            bottom_surface_ax.set_xticks([])
+            bottom_surface_ax.set_yticks([])
+            bottom_surface_ax.set_facecolor(NAVY_BG)
+            bottom_surface_ax.text(
                 0.5, 0.5, "no growth yet",
-                color=(*PHOSPHOR, 0.5), fontsize=FS_BODY,
-                ha="center", va="center", transform=bottom_left_ax.transAxes,
+                color=(*PHOSPHOR, 0.5), fontsize=FS_CAPTION,
+                ha="center", va="center", transform=bottom_surface_ax.transAxes,
             )
             return
 
@@ -1121,18 +1133,61 @@ def main():
         textures = body_builder._read_json(
             body_builder.WORLD_TEXTURES_PATH, {}
         ).get("textures", {})
-        heightmap = textures.get(best_name, {}).get("heightmap")
+        heightmap_raw = textures.get(best_name, {}).get("heightmap")
 
-        if heightmap is None:
-            bottom_left_ax.set_facecolor(NAVY_BG)
-            bottom_left_ax.text(
-                0.5, 0.5, f"{best_name}: no cached texture yet",
-                color=(*PHOSPHOR, 0.5), fontsize=FS_BODY,
-                ha="center", va="center", transform=bottom_left_ax.transAxes,
+        if heightmap_raw is None:
+            bottom_surface_ax.set_xticks([])
+            bottom_surface_ax.set_yticks([])
+            bottom_surface_ax.set_facecolor(NAVY_BG)
+            bottom_surface_ax.text(
+                0.5, 0.5, f"{best_name}: no texture yet",
+                color=(*PHOSPHOR, 0.5), fontsize=FS_CAPTION,
+                ha="center", va="center", transform=bottom_surface_ax.transAxes,
             )
             return
 
-        bottom_left_ax.imshow(heightmap, cmap=_TERRAIN_CMAP)
+        # Flat: the raw numbers, unmapped.
+        bottom_surface_ax.set_xticks([])
+        bottom_surface_ax.set_yticks([])
+        bottom_surface_ax.imshow(heightmap_raw, cmap=_TERRAIN_CMAP)
+
+        # Sphere: the same numbers, mapped exactly the way the main L3
+        # renderer would -- resampled to a fixed preview resolution,
+        # tinted facecolors, real geometric displacement.
+        preview_resolution = 40
+        heightmap = np.asarray(heightmap_raw, dtype=float)
+        h, w = heightmap.shape
+        if (h, w) != (preview_resolution, preview_resolution):
+            ys = np.linspace(0, h - 1, preview_resolution)
+            xs = np.linspace(0, w - 1, preview_resolution)
+            y0 = np.floor(ys).astype(int)
+            y1 = np.clip(y0 + 1, 0, h - 1)
+            x0 = np.floor(xs).astype(int)
+            x1 = np.clip(x0 + 1, 0, w - 1)
+            wy = (ys - y0)[:, None]
+            wx = (xs - x0)[None, :]
+            top = heightmap[y0][:, x0] * (1 - wx) + heightmap[y0][:, x1] * wx
+            bottom = heightmap[y1][:, x0] * (1 - wx) + heightmap[y1][:, x1] * wx
+            heightmap = top * (1 - wy) + bottom * wy
+
+        base_hex = BODY_COLORS.get(best_name, "#AAAAAA")
+        xs3d, ys3d, zs3d = _displaced_sphere_mesh(
+            0.0, 0.0, 0.0, 1.0, heightmap, preview_resolution,
+        )
+        bottom_body_ax.plot_surface(
+            xs3d, ys3d, zs3d,
+            facecolors=_texture_facecolors(heightmap, base_hex),
+            linewidth=0, antialiased=False, shade=False,
+        )
+        bottom_body_ax.set_xticks([])
+        bottom_body_ax.set_yticks([])
+        bottom_body_ax.set_zticks([])
+        bottom_body_ax.set_facecolor(NAVY_BG)
+        for axis in (bottom_body_ax.xaxis, bottom_body_ax.yaxis, bottom_body_ax.zaxis):
+            axis.pane.set_alpha(None)
+            axis.pane.set_facecolor((*NAVY_BG, 1.0))
+            axis.line.set_color((*PHOSPHOR, 0.0))
+        bottom_body_ax.grid(False)
 
     # cannon (modules/cannon_lib/cannon/) already has its own real
     # renderer -- reusing it beats reinventing a text summary. Rendered
@@ -1152,15 +1207,30 @@ def main():
     }
     _cannon_viewport_px = (520, 300)
 
-    def _render_cannon_scene():
-        """
-        One real fired shot (reference 12-pounder, 45deg), rendered
-        mid-flight through cannon's actual draw_scene() -- the same
-        function its own interactive game calls. Not tied to local-
-        physics-builder's specific training runs (those don't produce
-        a renderable trajectory, just a loss number); this shows what
-        the physics domain itself actually looks like.
-        """
+    # A real, LIVE animation -- not a re-picked static frame every 10s.
+    # One shot's full trajectory is fired once, then played back a few
+    # samples at a time on every redraw, the same "watch it happen"
+    # shape as the centre panel's own orbiting planets. When a shot
+    # lands or times out, a fresh one fires automatically.
+    #
+    # Honest limit: it's always the SAME reference 12-pounder shot --
+    # local-physics-builder only varies its training seed today (see
+    # modules/local_physics_builder.py), not projectile type or size.
+    # Varying shot/projectile is a real, natural next move to add to
+    # its BODY_MOVES-equivalent vocabulary, not something faked here.
+    _cannon_shot: dict = {}
+    CANNON_SAMPLES_PER_TICK = 6
+    CANNON_TRAIL_SAMPLES = 60
+
+    def _fire_new_cannon_shot():
+        # INSERT PROJECTILE-SHAPE VARIATION HERE once local_physics_
+        # builder.py grows a real move vocabulary for it (today it only
+        # varies training seed -- see propose_seed() there). gun.Shot
+        # only takes mass_kg/diameter_m today (cannon/gun.py), so a
+        # non-spherical shape would need cannon's own engine extended
+        # first, not just a different Shot instance -- spheres of
+        # varying size/mass are the reachable first step, real shape
+        # variation is further out.
         initial_state, bore = cannon_gun.fire(
             cannon_gun.GRIBEAUVAL_12PDR, cannon_gun.IRON_SHOT_12PDR,
             charge_kg=cannon_gun.CHARGE_REFERENCE_KG,
@@ -1169,10 +1239,32 @@ def main():
         result = cannon_physics.integrate_flight(
             initial_state, drag_enabled=True, ground_enabled=True,
         )
-        _t, state = result.samples[len(result.samples) // 3]
-
         camera = cannon_render.Camera(_cannon_viewport_px, anchor_m=initial_state.pos)
         camera.fit(result.apex_height_m * 1.5 + 50.0)
+        _cannon_shot.update({
+            "samples": result.samples, "camera": camera,
+            "bore": bore, "index": 0,
+        })
+
+    def _advance_cannon_frame():
+        if not _cannon_shot:
+            _fire_new_cannon_shot()
+
+        samples = _cannon_shot["samples"]
+        index = _cannon_shot["index"]
+
+        if index >= len(samples):
+            _fire_new_cannon_shot()
+            samples = _cannon_shot["samples"]
+            index = 0
+
+        _t, state = samples[index]
+        camera = _cannon_shot["camera"]
+        bore = _cannon_shot["bore"]
+
+        trail = tuple(
+            s.pos for _tt, s in samples[max(0, index - CANNON_TRAIL_SAMPLES):index]
+        )
 
         hud_values = cannon_render.Hud(
             elevation_deg=45.0, charge_kg=cannon_gun.CHARGE_REFERENCE_KG,
@@ -1186,30 +1278,22 @@ def main():
 
         surface = pygame.Surface(_cannon_viewport_px)
 
-        # The HUD readout panel (elevation/charge/speed/... box) reads
-        # fine at cannon's normal full-screen size but dominates this
-        # small thumbnail and crowds out the actual scene -- the data
-        # it shows already lives on the left dashboard now anyway (see
-        # LOCAL-PHYSICS-BUILDER there). Suppressed by monkey-patching
-        # _draw_hud to a no-op for just this call, not deleted and not
-        # touching cannon's own source: SHOW_CANNON_HUD flips it back
-        # on if ever wanted.
-        SHOW_CANNON_HUD = False
-        if SHOW_CANNON_HUD:
+        # HUD readout suppressed for this small thumbnail -- see the
+        # commit that added this: the data already lives on the left
+        # dashboard, and the box crowded out the actual scene. Real
+        # toggle (monkey-patch _draw_hud to a no-op for one call, then
+        # restore), not a fork of cannon's own source.
+        real_draw_hud = cannon_render._draw_hud
+        cannon_render._draw_hud = lambda *args, **kwargs: None
+        try:
             cannon_render.draw_scene(
                 surface, camera, cannon_gun.GRIBEAUVAL_12PDR, math.radians(45.0),
-                state, (), hud_values, _cannon_fonts,
+                state, trail, hud_values, _cannon_fonts,
             )
-        else:
-            real_draw_hud = cannon_render._draw_hud
-            cannon_render._draw_hud = lambda *args, **kwargs: None
-            try:
-                cannon_render.draw_scene(
-                    surface, camera, cannon_gun.GRIBEAUVAL_12PDR, math.radians(45.0),
-                    state, (), hud_values, _cannon_fonts,
-                )
-            finally:
-                cannon_render._draw_hud = real_draw_hud
+        finally:
+            cannon_render._draw_hud = real_draw_hud
+
+        _cannon_shot["index"] = index + CANNON_SAMPLES_PER_TICK
 
         # pygame surfarray is (width, height, 3) -- imshow wants
         # (height, width, 3).
@@ -1229,7 +1313,7 @@ def main():
             spine.set_color((*PHOSPHOR, 0.4))
 
         try:
-            image = _render_cannon_scene()
+            image = _advance_cannon_frame()
             bottom_right_ax.imshow(image)
         except Exception as exc:
             bottom_right_ax.set_facecolor(NAVY_BG)
