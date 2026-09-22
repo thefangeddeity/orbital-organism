@@ -201,6 +201,17 @@ def main():
     fig = plt.figure(figsize=(16, 9))
     fig.patch.set_facecolor(NAVY_BG)
 
+    # Maximized by default -- two more panels (body-builder, local-
+    # physics-builder) now share the window with the original three,
+    # and the fixed 16x9 figure size was already tight before that.
+    # TkAgg-specific (this project's backend, confirmed via matplotlib
+    # .get_backend()); wrapped in try/except since a different backend
+    # would just mean this is a no-op, not a crash.
+    try:
+        fig.canvas.manager.window.state("zoomed")
+    except Exception:
+        pass
+
     # Shared layout system: every panel uses the same top/bottom bounds
     # and the same framed treatment, so the window reads as one
     # composed design instead of three independently-styled boxes.
@@ -216,7 +227,7 @@ def main():
     # original full height unchanged. Static content, drawn once after
     # setup rather than every frame: unlike the three panels above,
     # nothing here changes without a fresh dispatch run.
-    BOTTOM_PANEL_HEIGHT = 0.20
+    BOTTOM_PANEL_HEIGHT = 0.25
     CENTER_PANEL_BOTTOM = PANEL_BOTTOM + BOTTOM_PANEL_HEIGHT
     CENTER_PANEL_HEIGHT = PANEL_TOP - CENTER_PANEL_BOTTOM
 
@@ -225,8 +236,19 @@ def main():
         [0.21, CENTER_PANEL_BOTTOM, 0.56, CENTER_PANEL_HEIGHT], projection="3d",
     )
     right_ax = fig.add_axes([0.80, PANEL_BOTTOM, 0.18, PANEL_HEIGHT])
-    bottom_ax = fig.add_axes(
-        [0.21, PANEL_BOTTOM, 0.56, BOTTOM_PANEL_HEIGHT - 0.03],
+
+    # Split in two: body-builder (visual fidelity, Tina) on the left,
+    # local-physics-builder (real ballistics training, Tanzania) on the
+    # right -- two different growth loops, two different panels, not
+    # one crowded one.
+    BOTTOM_GAP = 0.02
+    BOTTOM_HALF_WIDTH = (0.56 - BOTTOM_GAP) / 2.0
+    bottom_left_ax = fig.add_axes(
+        [0.21, PANEL_BOTTOM, BOTTOM_HALF_WIDTH, BOTTOM_PANEL_HEIGHT - 0.03],
+    )
+    bottom_right_ax = fig.add_axes(
+        [0.21 + BOTTOM_HALF_WIDTH + BOTTOM_GAP, PANEL_BOTTOM,
+         BOTTOM_HALF_WIDTH, BOTTOM_PANEL_HEIGHT - 0.03],
     )
 
     PHOSPHOR = (0.0, 0.85, 1.0)
@@ -1057,63 +1079,146 @@ def main():
     # the organism runs, so it's re-rendered periodically below, not
     # just once at boot.
     import body_builder
+    import local_physics_builder
+
+    # Real terrain colormap for body-builder's own generated
+    # heightmaps -- navy/phosphor palette everywhere else, but a
+    # heightmap read as an actual terrain-toned image is the whole
+    # point of looking at it.
+    _TERRAIN_CMAP = LinearSegmentedColormap.from_list(
+        "body_builder_terrain",
+        ["#0a1a2e", "#1f4d3d", "#5c7a3d", "#a08850", "#d9c9a3", "#f5f0e6"],
+    )
 
     def _render_body_builder_panel():
-        bottom_ax.clear()
-        bottom_ax.set_facecolor(NAVY_BG)
-        for spine in bottom_ax.spines.values():
+        """
+        Read-only visual: the actual generated heightmap for whichever
+        body has grown the most (most accepted candidates), straight
+        from state/world_textures.json -- the same file organism.py's
+        own L2/L3 renderer reads. Numeric progress lives on the left
+        dashboard now, not here.
+        """
+        bottom_left_ax.clear()
+        bottom_left_ax.set_xticks([])
+        bottom_left_ax.set_yticks([])
+        for spine in bottom_left_ax.spines.values():
             spine.set_color((*PHOSPHOR, 0.4))
-        bottom_ax.set_xticks([])
-        bottom_ax.set_yticks([])
-        bottom_ax.set_xlim(0, 1)
-        bottom_ax.set_ylim(0, 1)
 
         state = body_builder.load_state()
         bodies = state.get("bodies", {})
 
-        bottom_ax.text(
-            0.01, 0.92,
-            f"BODY-BUILDING "
-            f"(run tools/run_body_builder.py to grow bodies)",
-            color=PHOSPHOR, fontsize=FS_SUBHEAD, ha="left", va="top",
-            transform=bottom_ax.transAxes,
-        )
-
         if not bodies:
-            bottom_ax.text(
-                0.5, 0.5,
-                "no growth yet -- start tools/run_body_builder.py",
+            bottom_left_ax.set_facecolor(NAVY_BG)
+            bottom_left_ax.text(
+                0.5, 0.5, "no growth yet",
                 color=(*PHOSPHOR, 0.5), fontsize=FS_BODY,
-                ha="center", va="center", transform=bottom_ax.transAxes,
+                ha="center", va="center", transform=bottom_left_ax.transAxes,
             )
             return
 
-        # Two columns so up to ~10 bodies fit without the panel growing
-        # taller than the space carved out for it.
-        names = sorted(bodies.keys())
-        rows_per_col = max(1, math.ceil(len(names) / 2))
+        best_name = max(bodies, key=lambda n: bodies[n].get("accepted", 0))
 
-        for i, name in enumerate(names):
-            col = i // rows_per_col
-            row = i % rows_per_col
-            x = 0.01 + col * 0.5
-            y = 0.78 - row * 0.14
+        textures = body_builder._read_json(
+            body_builder.WORLD_TEXTURES_PATH, {}
+        ).get("textures", {})
+        heightmap = textures.get(best_name, {}).get("heightmap")
 
-            b = bodies[name]
-            params = b.get("current_params", {})
-            line = (
-                f"{name:<10s} gen={b.get('generation', 0):<4d} "
-                f"accepted={b.get('accepted', 0):<3d} "
-                f"{params.get('resolution', '?')}x{params.get('resolution', '?')} "
-                f"oct={params.get('octaves', '?')}"
+        if heightmap is None:
+            bottom_left_ax.set_facecolor(NAVY_BG)
+            bottom_left_ax.text(
+                0.5, 0.5, f"{best_name}: no cached texture yet",
+                color=(*PHOSPHOR, 0.5), fontsize=FS_BODY,
+                ha="center", va="center", transform=bottom_left_ax.transAxes,
             )
-            bottom_ax.text(
-                x, y, line, color=(*PHOSPHOR, A_PRIMARY), fontsize=FS_BODY,
-                ha="left", va="top", family="monospace",
-                transform=bottom_ax.transAxes,
+            return
+
+        bottom_left_ax.imshow(heightmap, cmap=_TERRAIN_CMAP)
+
+    # cannon (modules/cannon_lib/cannon/) already has its own real
+    # renderer -- reusing it beats reinventing a text summary. Rendered
+    # to an offscreen pygame Surface (no window, nothing shown outside
+    # this panel) and blitted in via imshow(). Real physics, real HUD
+    # numbers, not a mock-up.
+    import pygame
+    from cannon_lib.cannon import gun as cannon_gun
+    from cannon_lib.cannon import physics as cannon_physics
+    from cannon_lib.cannon import render as cannon_render
+    from cannon_lib.cannon import planet as cannon_planet
+
+    pygame.init()
+    _cannon_fonts = {
+        "mono": pygame.font.SysFont("consolas,dejavusansmono,couriernew", 13),
+        "small": pygame.font.SysFont("consolas,dejavusansmono,couriernew", 11),
+    }
+    _cannon_viewport_px = (520, 300)
+
+    def _render_cannon_scene():
+        """
+        One real fired shot (reference 12-pounder, 45deg), rendered
+        mid-flight through cannon's actual draw_scene() -- the same
+        function its own interactive game calls. Not tied to local-
+        physics-builder's specific training runs (those don't produce
+        a renderable trajectory, just a loss number); this shows what
+        the physics domain itself actually looks like.
+        """
+        initial_state, bore = cannon_gun.fire(
+            cannon_gun.GRIBEAUVAL_12PDR, cannon_gun.IRON_SHOT_12PDR,
+            charge_kg=cannon_gun.CHARGE_REFERENCE_KG,
+            elevation_rad=math.radians(45.0),
+        )
+        result = cannon_physics.integrate_flight(
+            initial_state, drag_enabled=True, ground_enabled=True,
+        )
+        _t, state = result.samples[len(result.samples) // 3]
+
+        camera = cannon_render.Camera(_cannon_viewport_px, anchor_m=initial_state.pos)
+        camera.fit(result.apex_height_m * 1.5 + 50.0)
+
+        hud_values = cannon_render.Hud(
+            elevation_deg=45.0, charge_kg=cannon_gun.CHARGE_REFERENCE_KG,
+            muzzle_velocity_ms=bore.muzzle_speed_ms, speed_ms=state.speed_ms,
+            mach=state.mach, altitude_m=cannon_planet.altitude_m(state.pos),
+            downrange_m=cannon_planet.downrange_m(state.pos), flight_path_deg=0.0,
+            flight_time_s=_t, time_scale=1.0, drag_enabled=True,
+            block_speed_ms=0.0, block_omega_rads=0.0, rounds_on_field=1,
+            status="LIVE",
+        )
+
+        surface = pygame.Surface(_cannon_viewport_px)
+        cannon_render.draw_scene(
+            surface, camera, cannon_gun.GRIBEAUVAL_12PDR, math.radians(45.0),
+            state, (), hud_values, _cannon_fonts,
+        )
+        # pygame surfarray is (width, height, 3) -- imshow wants
+        # (height, width, 3).
+        return np.transpose(pygame.surfarray.array3d(surface), (1, 0, 2))
+
+    def _render_local_physics_panel():
+        """
+        Read-only visual: cannon's own real renderer, shrunk to fit --
+        not stretched to fill the panel box, same pixel aspect ratio
+        it would show at native size. Numeric progress lives on the
+        left dashboard now, not here.
+        """
+        bottom_right_ax.clear()
+        bottom_right_ax.set_xticks([])
+        bottom_right_ax.set_yticks([])
+        for spine in bottom_right_ax.spines.values():
+            spine.set_color((*PHOSPHOR, 0.4))
+
+        try:
+            image = _render_cannon_scene()
+            bottom_right_ax.imshow(image)
+        except Exception as exc:
+            bottom_right_ax.set_facecolor(NAVY_BG)
+            bottom_right_ax.text(
+                0.5, 0.5, f"cannon render failed: {exc}",
+                color=(*PHOSPHOR, 0.5), fontsize=FS_CAPTION,
+                ha="center", va="center", transform=bottom_right_ax.transAxes,
             )
 
     _render_body_builder_panel()
+    _render_local_physics_panel()
     last_body_builder_render = time.perf_counter()
 
     last = time.perf_counter()
@@ -1715,6 +1820,40 @@ def main():
             else:
                 lines.append("  last: none proposed yet")
 
+            # Numeric summaries for both growth loops live here, not on
+            # their own visual panels below -- those are read-only
+            # displays now (cannon's real renderer, a real generated
+            # heightmap), and text competing with a visual for the same
+            # small space just makes both harder to read.
+            bb_state = body_builder.load_state()
+            bb_bodies = bb_state.get("bodies", {})
+            lines.extend(["", "BODY-BUILDER"])
+            if bb_bodies:
+                total_accepted = sum(b.get("accepted", 0) for b in bb_bodies.values())
+                best_name = max(
+                    bb_bodies, key=lambda n: bb_bodies[n].get("accepted", 0)
+                )
+                lines.append(
+                    f"  {len(bb_bodies)} bodies, {total_accepted} accepted total"
+                )
+                lines.append(f"  best: {best_name}")
+            else:
+                lines.append("  no growth yet")
+
+            lpb_state = local_physics_builder.load_state()
+            lpb_earth = lpb_state.get("bodies", {}).get("Earth", {})
+            lines.extend(["", "LOCAL-PHYSICS-BUILDER"])
+            if lpb_earth:
+                best_loss = lpb_earth.get("best_final_loss")
+                best_loss_str = f"{best_loss:.4g}" if best_loss is not None else "?"
+                lines.append(
+                    f"  Earth gen={lpb_earth.get('generation', 0)} "
+                    f"acc={lpb_earth.get('accepted', 0)}"
+                )
+                lines.append(f"  best_loss: {best_loss_str}")
+            else:
+                lines.append("  no runs yet")
+
             dashboard_ax.text(
                 0.05, 0.88, "\n".join(lines),
                 color=PHOSPHOR, fontsize=7.5, family="monospace",
@@ -1763,14 +1902,15 @@ def main():
                     )
                 print(f"\r{status}...", end="", flush=True)
 
-            # body_builder.json/body_builder_history.json only change
-            # roughly once a minute (tools/run_body_builder.py's own
-            # dispatch cadence) -- re-reading and redrawing every frame
-            # would be pure waste. 10s keeps the panel visibly live
-            # without it.
+            # Neither body_builder.json nor local_physics_builder.json
+            # change faster than their own runner's dispatch cadence
+            # (~60s / ~120s respectively) -- re-reading and redrawing
+            # every frame would be pure waste. 10s keeps both panels
+            # visibly live without it.
             if time.perf_counter() - last_body_builder_render >= 10.0:
                 last_body_builder_render = time.perf_counter()
                 _render_body_builder_panel()
+                _render_local_physics_panel()
 
             time.sleep(0.03)
 
