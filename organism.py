@@ -433,11 +433,9 @@ def main():
         _style_2d_panel(tanzania_ax)
 
         online = tanzania_provider.available()
-        # Both states now use the same alpha the rest of the panel's
-        # phosphor elements use (0.85-0.9), instead of the status dot
-        # being the one fully-opaque element in an otherwise
-        # alpha-blended system.
-        status_color = (*PHOSPHOR, 0.9) if online else (0.8, 0.25, 0.25, 0.85)
+        # One hue, not a color-coded red/cyan switch -- online is full
+        # phosphor brightness, offline is the same phosphor dimmed.
+        status_color = (*PHOSPHOR, 0.9) if online else (*PHOSPHOR, 0.4)
 
         # Sans-serif for the header, not monospace -- monospace stays
         # reserved for tabular data below, where alignment matters.
@@ -448,17 +446,22 @@ def main():
             color=PHOSPHOR, fontsize=11, weight="bold", va="center",
         )
         # A bordered badge, not bare floating text -- otherwise it has
-        # nothing grounding it against the panel edge.
+        # nothing grounding it against the panel edge. Kept clear of
+        # the top-right corner bracket (which occupies roughly
+        # x=0.955-1.0) with real margin, and the text has actual
+        # padding from the box edge instead of nearly touching it.
+        badge_right = 0.90
+        badge_left = 0.62
         tanzania_ax.add_patch(
             Rectangle(
-                (0.73, 0.935), 0.24, 0.032,
+                (badge_left, 0.933), badge_right - badge_left, 0.036,
                 transform=tanzania_ax.transAxes,
-                edgecolor=(*status_color[:3], 0.7), facecolor=(*status_color[:3], 0.12),
+                edgecolor=(*status_color[:3], 0.7), facecolor=(*status_color[:3], 0.1),
                 linewidth=1.0,
             )
         )
         tanzania_ax.text(
-            0.95, 0.951, "ONLINE" if online else "OFFLINE",
+            badge_right - 0.03, 0.951, "ONLINE" if online else "OFFLINE",
             color=status_color, fontsize=8, weight="bold",
             va="center", ha="right",
         )
