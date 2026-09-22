@@ -398,13 +398,20 @@ def main():
         # of the axes' aspect ratio.
         tanzania_ax.scatter(
             [0.10], [0.95],
-            s=110, color=status_color, zorder=3,
+            s=90, color=status_color, zorder=3,
             transform=tanzania_ax.transData,
         )
         tanzania_ax.text(
             0.20, 0.95, "TANZANIA",
             color=PHOSPHOR, fontsize=10, family="monospace",
             weight="bold", va="center",
+        )
+        # A color-only dot makes the viewer decode red/green every
+        # time. Explicit text next to it removes the guesswork.
+        tanzania_ax.text(
+            0.95, 0.95, "ONLINE" if online else "OFFLINE",
+            color=status_color, fontsize=7.5, family="monospace",
+            weight="bold", va="center", ha="right",
         )
         tanzania_ax.text(
             0.20, 0.905, tanzania_provider.host_info,
@@ -415,7 +422,6 @@ def main():
         job_count, last_task = _tanzania_dispatch_history()
 
         info_lines = [
-            f"status: {'ONLINE' if online else 'OFFLINE'}",
             f"role: {tanzania_provider.role or 'n/a'}",
             f"addr: {tanzania_provider.address or 'unconfigured'}",
             "",
