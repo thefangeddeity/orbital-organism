@@ -24,6 +24,8 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
+
 ORGANISM_DIR = Path(__file__).resolve().parent.parent
 STATE_DIR = ORGANISM_DIR / "state"
 MODULES_DIR = ORGANISM_DIR / "modules"
@@ -90,49 +92,65 @@ def generate_samples(count_days: float = 3 * 365.25) -> list[dict]:
     return samples
 
 
+def _load_live_learner():
+    """
+    Constructs the actual live NeuralLearner via attach_simulator(True),
+    which loads weights AND replays self_program.json -- including any
+    active scratch tree -- straight from disk, the identical code path
+    every real learner process uses to figure out its own current state.
+
+    Shared by build_payload() (to label the sweep's baseline row with
+    the REAL current core/weighting/activation, not a hardcoded guess)
+    and local_reference_score() (the zero-training fallback score), so
+    there's exactly one place that determines "what is the organism
+    currently running" -- not two that could quietly drift apart.
+    """
+    from neural_learner import NeuralLearner
+
+    learner = NeuralLearner()
+    learner.attach_simulator(True)
+    return learner
+
+
 def build_payload(task: str) -> dict:
     state_path = STATE_DIR / "neural_learner.json"
     state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+
+    learner = _load_live_learner()
 
     return {
         "task": task,
         "parameters": state["parameters"],
         "network": state["network"],
-        "baseline_loss_variant": "square/uniform",
-        "baseline_activation_variant": "relu",
+        # The learner's ACTUAL current variant, not a hardcoded guess --
+        # this is what lets adopt_if_better() find the matching, fairly-
+        # trained row in the sweep instead of comparing against an
+        # untrained score. See adopt_if_better()'s docstring.
+        "baseline_loss_variant": learner.get_loss_function().name,
+        "baseline_activation_variant": learner.active_activation_variant,
+        "baseline_is_scratch": learner.active_scratch_tree is not None,
         "samples": generate_samples(),
     }
 
 
 def local_reference_score(payload: dict) -> float:
     """
-    The current network's score on loss_blocks.REFERENCE_METRIC,
-    computed locally (not shipped) -- the fixed yardstick a sweep
-    result has to actually beat before it's worth adopting.
+    Zero-training score of the current live network on
+    loss_blocks.REFERENCE_METRIC.
 
-    Imports the real NeuralLearner rather than reimplementing its
-    construction, same reasoning as remote_runner.py: no drift risk
-    between what's compared here and what's compared on Tanzania.
-    Deterministic RNG (NeuralLearner seeds np.random.default_rng(42)
-    fresh at construction) means this draws the same validation batch
-    a freshly-built remote learner would from the same samples list,
-    so the two sides are genuinely comparable.
+    This alone is NOT a fair baseline for adoption anymore: every row in
+    the remote sweep (including whichever one matches the live config)
+    receives TRAIN_STEPS_PER_COMBO of real training first, so comparing
+    a trained sweep row against this untrained number has exactly the
+    "training itself looks like the improvement" confound that was
+    found and fixed in evaluate_candidate_real() locally (noop won
+    20/20 against an untrained baseline there). adopt_if_better() now
+    prefers the sweep's own matching row -- trained the same amount --
+    as the real baseline, and falls back to this number only when the
+    live config is a scratch tree with no named row in the sweep to
+    match against.
     """
-    import numpy as np
-    from neural_learner import NeuralLearner
-
-    learner = NeuralLearner()
-    learner.sim = True
-    learner.parameters.update(payload["parameters"])
-
-    network = payload["network"]
-    learner.w1 = np.asarray(network["w1"], dtype=float)
-    learner.b1 = np.asarray(network["b1"], dtype=float)
-    learner.w2 = np.asarray(network["w2"], dtype=float)
-    learner.b2 = np.asarray(network["b2"], dtype=float)
-    learner.w3 = np.asarray(network["w3"], dtype=float)
-    learner.b3 = np.asarray(network["b3"], dtype=float)
-    learner.hidden_width = learner.w1.shape[1]
+    learner = _load_live_learner()
 
     learner.observation_samples = [
         (np.asarray(s["x"], dtype=float), np.asarray(s["y"], dtype=float))
@@ -142,28 +160,70 @@ def local_reference_score(payload: dict) -> float:
     return learner._reference_score()
 
 
-def adopt_if_better(best: dict, baseline: float) -> dict:
+def adopt_if_better(result: dict, baseline: float, payload: dict) -> dict:
     """
-    If the sweep's best combination clears the current network by a
-    real margin, write it into self_program.json as an accepted
-    mutation -- with provenance -- so the next boot's
-    _replay_accepted_variants() picks it up (never injected into a
-    currently-running process; see the module docstring).
+    If the sweep's best combination clears the CURRENT config by a real
+    margin -- both sides trained the same amount -- write it into
+    self_program.json as an accepted mutation with provenance, so the
+    next boot's _replay_accepted_variants() picks it up (never injected
+    into a currently-running process; see the module docstring).
+
+    Prefers, as the baseline, the sweep row matching the live learner's
+    own (loss_variant, activation_variant) -- it went through the exact
+    same TRAIN_STEPS_PER_COMBO training burst from the exact same
+    starting weights as every other row, so it's a fair "current config,
+    trained" comparison point rather than "current config, untrained".
+    Falls back to the untrained `baseline` score only when the live
+    config is a scratch tree (payload["baseline_is_scratch"]) or, should
+    it happen, no matching row turns up in the sweep -- both flagged in
+    the returned report so a caller can see which comparison was used.
 
     Returns a small report dict describing what happened, for main()
     to print.
     """
+    best = result.get("best")
+    if not best:
+        return {"adopted": False, "reason": "no sweep results"}
+
     reference_after = best.get("reference_score")
-    if reference_after is None or baseline <= 0:
+    if reference_after is None:
         return {"adopted": False, "reason": "no comparable baseline"}
 
-    improvement = (baseline - reference_after) / baseline
+    matched_baseline = None
+    if not payload.get("baseline_is_scratch"):
+        for entry in result.get("results", []):
+            if (
+                entry["loss_variant"] == payload.get("baseline_loss_variant")
+                and entry["activation_variant"]
+                == payload.get("baseline_activation_variant")
+            ):
+                matched_baseline = entry["reference_score"]
+                break
+
+    if matched_baseline is not None:
+        true_baseline = matched_baseline
+        baseline_kind = "trained-matched"
+    else:
+        # Scratch-tree baseline (no named row can match it), or,
+        # unexpectedly, no matching row found -- fall back to the
+        # untrained score. Known to slightly overstate any adopted
+        # improvement, since the sweep side got a training burst this
+        # side didn't; MIN_IMPROVEMENT_TO_ADOPT still gates it so a
+        # marginal case won't adopt purely on that gap.
+        true_baseline = baseline
+        baseline_kind = "untrained-fallback"
+
+    if true_baseline <= 0:
+        return {"adopted": False, "reason": "no comparable baseline"}
+
+    improvement = (true_baseline - reference_after) / true_baseline
 
     if improvement < MIN_IMPROVEMENT_TO_ADOPT:
         return {
             "adopted": False,
             "reason": f"improvement {improvement:.1%} below "
-                      f"{MIN_IMPROVEMENT_TO_ADOPT:.0%} floor",
+                      f"{MIN_IMPROVEMENT_TO_ADOPT:.0%} floor "
+                      f"(baseline: {baseline_kind})",
         }
 
     core, _, weighting = best["loss_variant"].partition("/")
@@ -190,6 +250,7 @@ def adopt_if_better(best: dict, baseline: float) -> dict:
         "success_rate": accepted / max(generation, 1),
         "generations_since_accepted": 0,
         "source": "tanzania_sweep",
+        "baseline_kind": baseline_kind,
     }
 
     temp = program_path.with_suffix(".tmp")
@@ -200,8 +261,9 @@ def adopt_if_better(best: dict, baseline: float) -> dict:
         "adopted": True,
         "commands": commands,
         "improvement": improvement,
-        "reference_before": baseline,
+        "reference_before": true_baseline,
         "reference_after": reference_after,
+        "baseline_kind": baseline_kind,
     }
 
 
@@ -292,17 +354,19 @@ def main():
         print(f"Best combination: loss={best['loss_variant']} "
               f"activation={best['activation_variant']} "
               f"-> reference_score={best['reference_score']:.6f} "
-              f"(current network: {baseline:.6f})")
+              f"(current network, untrained: {baseline:.6f})")
         print(f"sample count: {result['sample_count']}, "
               f"combinations tried: {result.get('combinations_tried', len(result['results']))}")
 
-        adoption = adopt_if_better(best, baseline)
+        adoption = adopt_if_better(result, baseline, payload)
         print()
 
         if adoption["adopted"]:
             print(
                 f"ADOPTED -> {adoption['commands']} "
-                f"({adoption['improvement']:.1%} improvement). "
+                f"({adoption['improvement']:.1%} improvement over "
+                f"{adoption['baseline_kind']} baseline "
+                f"{adoption['reference_before']:.6f}). "
                 f"Takes effect on the organism's next boot."
             )
         else:

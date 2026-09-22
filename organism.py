@@ -1315,7 +1315,12 @@ def main():
                         f"rate: {learner.evolution_success_rate:.1%}"
                     ),
                     f"  steps: {learner.training_steps:,}",
-                    f"  loss_fn: {learner.active_loss_variant}",
+                    # .get_loss_function().name, not the raw
+                    # active_loss_variant string -- a scratch-proposed
+                    # core (learner.active_scratch_tree) overrides the
+                    # named core but doesn't change that string, so
+                    # reading it directly would display a stale name.
+                    f"  loss_fn: {learner.get_loss_function().name}",
                     f"  features: {learner.active_feature_variant}",
                     f"  activation: {learner.active_activation_variant}",
                     f"  width: {learner.hidden_width}",

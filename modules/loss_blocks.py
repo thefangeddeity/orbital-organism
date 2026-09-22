@@ -154,9 +154,20 @@ class ComposedLoss:
 
     value() and grad() are computed from the same pair of blocks, so
     they cannot describe different objectives.
+
+    custom_core, if given, is a (value_fn, grad_fn) pair overriding the
+    named `core` lookup entirely -- this is the hook scratch_blocks.py
+    proposals use: a block-tree's evaluate()/grad() wrapped as a pair
+    slots in here and gets the WEIGHTINGS system for free, without
+    scratch_blocks.py needing to know anything about weightings at all.
     """
 
-    def __init__(self, core: str = "square", weighting: str = "uniform"):
+    def __init__(
+        self,
+        core: str = "square",
+        weighting: str = "uniform",
+        custom_core: tuple | None = None,
+    ):
         if core not in CORE_PENALTIES:
             core = "square"
         if weighting not in WEIGHTINGS:
@@ -164,14 +175,22 @@ class ComposedLoss:
 
         self.core = core
         self.weighting = weighting
+        self.custom_core = custom_core
 
     @property
     def name(self) -> str:
+        if self.custom_core is not None:
+            return f"scratch/{self.weighting}"
         return f"{self.core}/{self.weighting}"
+
+    def _penalty_pair(self):
+        if self.custom_core is not None:
+            return self.custom_core
+        return CORE_PENALTIES[self.core]
 
     def value(self, prediction, target) -> float:
         error = prediction - target
-        penalty, _ = CORE_PENALTIES[self.core]
+        penalty, _ = self._penalty_pair()
         weights = WEIGHTINGS[self.weighting](target)
         return float(np.mean(weights * penalty(error)))
 
@@ -183,7 +202,7 @@ class ComposedLoss:
         same 1/N appears here.
         """
         error = prediction - target
-        _, penalty_grad = CORE_PENALTIES[self.core]
+        _, penalty_grad = self._penalty_pair()
         weights = WEIGHTINGS[self.weighting](target)
         n = float(prediction.size) or 1.0
         return weights * penalty_grad(error) / n

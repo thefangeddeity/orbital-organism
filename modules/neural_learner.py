@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 import loss_blocks
+import scratch_blocks
 from lego import Lego, ModuleResult
 
 
@@ -92,6 +93,12 @@ class NeuralLearner(Lego):
         self.active_loss_variant = "mse"
         self.active_feature_variant = "basic"
         self.active_activation_variant = "relu"
+
+        # Scratch-block-proposed core penalty, when set, takes priority
+        # over active_loss_variant's named core (its weighting still
+        # applies -- see get_loss_function()). None means "not using a
+        # proposed core, use the named one instead".
+        self.active_scratch_tree: dict | None = None
 
         # Track evolution genealogy
         self.code_variants_tried = []
@@ -221,12 +228,62 @@ class NeuralLearner(Lego):
         callers use .value(prediction, target) and
         .grad(prediction, target). Accepts both legacy single names
         ("mse") and composed names ("huber/magnitude").
+
+        A scratch-proposed core (self.active_scratch_tree) takes
+        priority over the named core when set, but still goes through
+        the same weighting system -- weighting is orthogonal to
+        whether the core came from the fixed library or was proposed.
         """
-        return loss_blocks.from_name(self.active_loss_variant)
+        current = loss_blocks.from_name(self.active_loss_variant)
+
+        if self.active_scratch_tree is not None:
+            return loss_blocks.ComposedLoss(
+                weighting=current.weighting,
+                custom_core=scratch_blocks.as_core_penalty(self.active_scratch_tree),
+            )
+
+        return current
 
     def _set_loss_core(self, core: str) -> None:
         current = loss_blocks.from_name(self.active_loss_variant)
         self.active_loss_variant = f"{core}/{current.weighting}"
+        # Explicitly switching to a named core overrides any proposed
+        # one -- otherwise a switch_core_* command would silently do
+        # nothing while a scratch tree stayed in charge.
+        self.active_scratch_tree = None
+
+    def _propose_scratch_core(self) -> bool:
+        """
+        Generates a random block-tree candidate core penalty and, if
+        it survives validation and the gradient self-check, adopts it
+        as active_scratch_tree. Returns whether it was adopted.
+
+        A tree failing the check is not an error -- see
+        scratch_blocks.py's own self-test: ~30% of random trees are
+        genuinely pathological (division near zero, evaluated at a
+        sign()/min() kink) and SHOULD be rejected. Rejection here just
+        means this particular mutation attempt is a no-op, same as any
+        other candidate that doesn't pass evaluate_candidate_real().
+        """
+        tree = scratch_blocks.random_candidate_tree(self.rng, max_ops=3)
+
+        # A representative range of residuals to check the gradient
+        # over, not the live batch -- this only needs to catch
+        # pathological trees (near-zero divisions, kinks), not measure
+        # real performance, which evaluate_candidate_real() does next
+        # with the real reference metric.
+        probe = np.linspace(-2.0, 2.0, 9)
+
+        try:
+            problems = scratch_blocks.check_gradients(tree, {"e": probe})
+        except Exception:
+            return False
+
+        if problems:
+            return False
+
+        self.active_scratch_tree = tree
+        return True
 
     def _set_loss_weighting(self, weighting: str) -> None:
         current = loss_blocks.from_name(self.active_loss_variant)
@@ -294,6 +351,20 @@ class NeuralLearner(Lego):
                 data.get("generations_since_accepted", 0)
             )
             self._replay_accepted_variants(data.get("commands", []))
+
+            # scratch_tree is data, not a replayable command name (see
+            # self_evolve()'s write for why "propose_scratch_core" the
+            # command can't be replayed the way switch_core_* can be).
+            # Re-validated on load, not just trusted -- defense in
+            # depth against a hand-edited or corrupted state file
+            # introducing something outside the block vocabulary.
+            scratch_tree = data.get("scratch_tree")
+            if scratch_tree is not None:
+                try:
+                    scratch_blocks.validate(scratch_tree)
+                    self.active_scratch_tree = scratch_tree
+                except scratch_blocks.InvalidBlockTree:
+                    self.active_scratch_tree = None
         except Exception:
             pass
 
@@ -574,6 +645,40 @@ class NeuralLearner(Lego):
             np.asarray(xs, dtype=float),
             np.asarray(ys, dtype=float),
         )
+
+    def _make_holdout_batch(self, count):
+        """
+        Like _make_batch(), but drawn with a dedicated RNG that never
+        shares state with self.rng -- self.rng is what _train_step()
+        draws from too, so a held-out set sampled from it could
+        coincidentally overlap the very steps a candidate trains on
+        between the before/after comparison in evaluate_candidate_real().
+        Fixed seed, so this always draws the same relative slice
+        (same discipline tools/remote_runner.py's sweep uses with its
+        own dedicated holdout RNG) -- not meant to be the same physical
+        samples forever, just a reproducible sampling pattern applied
+        to whatever the current (possibly-evicted, capped at 4096)
+        pool is.
+        """
+        if len(self.observation_samples) < 2:
+            return (
+                np.empty((0, self.input_size), dtype=float),
+                np.empty((0, self.output_size), dtype=float),
+            )
+
+        holdout_rng = np.random.default_rng(20260921)
+        batch_size = min(int(count), len(self.observation_samples))
+        indices = holdout_rng.integers(
+            0, len(self.observation_samples), size=batch_size
+        )
+
+        xs = [self.observation_samples[int(i)][0] for i in indices]
+        ys = [self.observation_samples[int(i)][1] for i in indices]
+
+        return (
+            np.asarray(xs, dtype=float),
+            np.asarray(ys, dtype=float),
+        )
     # ------------------------------------------------------------------
     # ================================================================
     # SELF_EVOLUTION_BEGIN
@@ -584,6 +689,19 @@ class NeuralLearner(Lego):
     # It cannot execute arbitrary Python, import modules, access files,
     # alter the simulator, or modify the neural architecture.
     # ================================================================
+
+    # Real gradient steps run between applying a candidate and scoring
+    # it -- most mutations (core/weighting/scratch-core switches,
+    # learning_rate, batch_size) have literally zero effect on a
+    # forward pass by themselves; only activation and hidden_width
+    # changes touch it directly. Confirmed by direct test: applying
+    # switch_core_huber with no training in between left the reference
+    # score bit-for-bit identical. Small and fixed for now (this check
+    # runs roughly every evolution_interval observations, inline in
+    # the render loop's tick, so it has to stay cheap) -- same future
+    # self-tuning candidate as TRAIN_STEPS_PER_COMBO in
+    # tools/remote_runner.py.
+    LOCAL_CANDIDATE_TRAIN_STEPS = 12
 
     SELF_PROGRAM_PARAMETERS = {
         "learning_rate_scale": 1.0,
@@ -622,6 +740,11 @@ class NeuralLearner(Lego):
         "switch_activation_relu": ("active_activation_variant", "relu"),
         "switch_activation_tanh": ("active_activation_variant", "tanh"),
         "switch_activation_gelu": ("active_activation_variant", "gelu"),
+        # Genuinely new, not a recombination of the fixed library --
+        # generates a random block-tree (modules/scratch_blocks.py),
+        # validates it, gradient-checks it, and only then lets it
+        # compete for acceptance like any other candidate.
+        "propose_scratch_core": ("active_scratch_tree", "generated"),
         "noop": (None, 0),
     }
 
@@ -648,6 +771,16 @@ class NeuralLearner(Lego):
             "active_loss_variant": self.active_loss_variant,
             "active_feature_variant": self.active_feature_variant,
             "active_activation_variant": self.active_activation_variant,
+            # json round-trip, not the dict object itself -- a shallow
+            # copy would leave the snapshot aliased to the live tree,
+            # so a later apply_self_program() mutating it in place
+            # (it doesn't today, but nothing should rely on that) would
+            # corrupt the snapshot too. Trees are capped at 24 nodes,
+            # so this is cheap.
+            "active_scratch_tree": (
+                json.loads(json.dumps(self.active_scratch_tree))
+                if self.active_scratch_tree is not None else None
+            ),
             "validation_loss": self.validation_loss,
         }
 
@@ -663,6 +796,7 @@ class NeuralLearner(Lego):
         self.active_loss_variant = snapshot["active_loss_variant"]
         self.active_feature_variant = snapshot["active_feature_variant"]
         self.active_activation_variant = snapshot["active_activation_variant"]
+        self.active_scratch_tree = snapshot.get("active_scratch_tree")
         self.validation_loss = snapshot["validation_loss"]
 
     def _initialize_self_program(self):
@@ -733,7 +867,7 @@ class NeuralLearner(Lego):
         index = self.training_steps % len(candidates)
         return candidates[index]
 
-    def _reference_score(self):
+    def _reference_score(self, batch=None):
         """
         Fixed yardstick for evolution accept/reject, deliberately
         independent of whichever loss function is currently active.
@@ -749,7 +883,7 @@ class NeuralLearner(Lego):
         predicts better. Every candidate is judged on this one stable
         metric instead, no matter what it trains on.
         """
-        return self._validation_loss(metric=loss_blocks.REFERENCE_METRIC)
+        return self._validation_loss(metric=loss_blocks.REFERENCE_METRIC, batch=batch)
 
     def evaluate_candidate_real(self, candidate):
         """
@@ -762,28 +896,72 @@ class NeuralLearner(Lego):
         if not self.validate_self_program(candidate):
             return False, float("inf")
 
-        baseline = self._reference_score()
+        # ONE shared, dedicated-RNG held-out batch for scoring both
+        # runs -- not drawn from self.rng (which the training bursts
+        # below also draw from). Confirmed by direct test: calling
+        # _reference_score() repeatedly with ZERO mutations applied
+        # produced a 0.137-0.244 spread from sampling noise alone,
+        # comfortably large enough to flip an accept/reject decision
+        # regardless of whether a candidate does anything at all.
+        batch = self._make_holdout_batch(int(self.parameters["validation_size"]))
 
-        # Take snapshot before mutation
-        snapshot = self.snapshot_state()
+        pristine_snapshot = self.snapshot_state()
+        rng_state = self.rng.bit_generator.state
 
         try:
-            # Apply candidate mutations
+            # baseline = the CURRENT (unmutated) config, given the
+            # SAME number of additional training steps the candidate
+            # is about to get -- not a zero-training baseline. Most
+            # mutations (core/weighting/scratch-core switches,
+            # learning_rate, batch_size) have no effect on the forward
+            # pass by themselves (confirmed: applying switch_core_huber
+            # alone left the reference score bit-for-bit identical), so
+            # SOME training is required to test them at all. But
+            # comparing "mutated + trained" against "unmutated,
+            # untrained" would make training itself look like the
+            # mutation's doing -- confirmed by direct test: noop
+            # (which apply_self_program() doesn't even have a branch
+            # for -- it's a genuine no-op) "won" 20/20 times against a
+            # zero-training baseline, which only proves training helps,
+            # not that any particular mutation does. Both runs get the
+            # same LOCAL_CANDIDATE_TRAIN_STEPS from the same starting
+            # weights, isolating the mutation's own effect.
+            for _ in range(self.LOCAL_CANDIDATE_TRAIN_STEPS):
+                self._train_step()
+
+            baseline = self._reference_score(batch=batch)
+
+            # Back to the exact untouched starting point -- weights,
+            # parameters, AND the RNG stream, so the candidate run
+            # below draws the identical sequence of training
+            # mini-batches the baseline run just did. Without resetting
+            # rng_state too, the two runs would differ in which samples
+            # they trained on, reintroducing a smaller version of the
+            # same sampling-noise problem the holdout batch already
+            # fixed for scoring.
+            self.restore_state(pristine_snapshot)
+            self.rng.bit_generator.state = rng_state
+
             self.apply_self_program(candidate)
+
+            for _ in range(self.LOCAL_CANDIDATE_TRAIN_STEPS):
+                self._train_step()
 
             # Judged on the fixed reference metric, not whatever loss
             # the candidate just switched to.
-            reference_after = self._reference_score()
+            reference_after = self._reference_score(batch=batch)
 
             if reference_after >= baseline:
-                # No improvement: rollback
-                self.restore_state(snapshot)
+                # No improvement: rollback to the untouched start, not
+                # to the post-baseline-training state.
+                self.restore_state(pristine_snapshot)
                 return False, reference_after
 
-            # Improved. Keep the mutation, and refresh the displayed
-            # validation_loss/best_loss under whatever variant is now
-            # active -- a switch_loss_*/switch_core_*/switch_weighting_*
-            # command just changed what that number means.
+            # Improved. Keep the mutation (and the training it just
+            # received), and refresh the displayed validation_loss/
+            # best_loss under whatever variant is now active -- a
+            # switch_loss_*/switch_core_*/switch_weighting_* command
+            # just changed what that number means.
             self.validation_loss = self._validation_loss()
             if self.validation_loss < self.best_loss:
                 self.best_loss = self.validation_loss
@@ -792,7 +970,7 @@ class NeuralLearner(Lego):
 
         except Exception:
             # Crash or numerical instability: rollback and reject
-            self.restore_state(snapshot)
+            self.restore_state(pristine_snapshot)
             return False, float("inf")
 
     def apply_self_program(self, commands):
@@ -833,6 +1011,9 @@ class NeuralLearner(Lego):
                 legacy_name = {"weighted": "weighted_mse"}.get(loss_name, loss_name)
                 if legacy_name in loss_blocks.LEGACY_ALIASES:
                     self.active_loss_variant = legacy_name
+                    self.active_scratch_tree = None
+            elif command == "propose_scratch_core":
+                self._propose_scratch_core()
             elif command.startswith("switch_core_"):
                 core_name = command.replace("switch_core_", "")
                 if core_name in loss_blocks.CORE_PENALTIES:
@@ -926,6 +1107,18 @@ class NeuralLearner(Lego):
                     self.evolution_success_rate
                 ),
                 "generations_since_accepted": generations_since_accepted,
+                # Unconditional, not "only if accepted": if this cycle
+                # was rejected, restore_state() already reverted
+                # active_scratch_tree to whatever it was before this
+                # attempt, so writing it here always reflects the true
+                # current state either way. Distinct from `commands`,
+                # since "propose_scratch_core" (the command NAME) is
+                # non-deterministic -- replaying it would generate a
+                # DIFFERENT random tree, not reconstruct the one that
+                # was actually tested and accepted. The specific tree
+                # has to be persisted as data, not implied by a command
+                # name the way every other mutation can be.
+                "scratch_tree": self.active_scratch_tree,
             },
         )
 
@@ -1060,20 +1253,23 @@ class NeuralLearner(Lego):
         self.training_steps += 1
         self.last_loss = loss
 
-    def _validation_loss(self, metric=None):
+    def _validation_loss(self, metric=None, batch=None):
         if self.sim is None:
             return float("inf")
 
         if len(self.observation_samples) < 2:
             return float("inf")
 
-        x, target = self._make_batch(
-            int(
-                self.parameters[
-                    "validation_size"
-                ]
+        if batch is not None:
+            x, target = batch
+        else:
+            x, target = self._make_batch(
+                int(
+                    self.parameters[
+                        "validation_size"
+                    ]
+                )
             )
-        )
 
         prediction, _ = self._forward(x)
 
