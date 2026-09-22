@@ -197,6 +197,19 @@ def main():
 
     fig.canvas.mpl_connect("scroll_event", _on_scroll)
 
+    # Grid defaults OFF -- press 'g' to toggle. Even when on, mplot3d's
+    # gridlines don't respect ax.grid(color=..., alpha=...) the way 2-D
+    # axes do (they hardcode '#b0b0b0' internally); the real fix lives
+    # in _apply_dark_theme() below, which writes the pane's private
+    # _axinfo grid style directly.
+    grid_state = {"visible": False}
+
+    def _on_key(event):
+        if event.key == "g":
+            grid_state["visible"] = not grid_state["visible"]
+
+    fig.canvas.mpl_connect("key_press_event", _on_key)
+
     def _sphere_mesh(cx, cy, cz, radius, resolution=10):
         u = np.linspace(0, 2 * np.pi, resolution)
         v = np.linspace(0, np.pi, resolution)
@@ -228,11 +241,24 @@ def main():
         # every frame too -- not just once at setup.
         ax.set_facecolor("black")
 
-        for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
-            pane.set_facecolor((0.0, 0.0, 0.0, 1.0))
-            pane.set_edgecolor((*PHOSPHOR, 0.02))
+        visible = grid_state["visible"]
+        edge_alpha = 0.03 if visible else 0.0
+        grid_alpha = 0.10 if visible else 0.0
 
-        ax.grid(True, color=PHOSPHOR, alpha=0.025, linewidth=0.3)
+        for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+            axis.pane.set_facecolor((0.0, 0.0, 0.0, 1.0))
+            axis.pane.set_edgecolor((*PHOSPHOR, edge_alpha))
+
+            # mplot3d hardcodes '#b0b0b0' in the pane's private _axinfo
+            # dict and ignores ax.grid()'s color/alpha kwargs entirely --
+            # this is the actual fix, not just a dimmer number.
+            try:
+                axis._axinfo["grid"]["color"] = (*PHOSPHOR, grid_alpha)
+                axis._axinfo["grid"]["linewidth"] = 0.3
+            except (AttributeError, KeyError):
+                pass
+
+        ax.grid(visible)
 
         ax.tick_params(colors=(*PHOSPHOR,))
 
@@ -360,7 +386,7 @@ def main():
             if learner is not None:
                 evolution_runs_before = learner.evolution_runs
 
-                learning_result = learner.observe(None)
+                learning_result = learner.observe(result)
 
                 if learner.evolution_runs > evolution_runs_before:
                     upgrade_report = budget.consider_upgrade(
@@ -751,11 +777,11 @@ def main():
                     ),
                     (
                         f"  validation: "
-                        f"{learner.validation_loss:.8f}"
+                        f"{learner.validation_loss:.3e}"
                     ),
                     (
                         f"  best: "
-                        f"{learner.best_loss:.8f}"
+                        f"{learner.best_loss:.3e}"
                     ),
                     (
                         f"  width: "
@@ -846,13 +872,21 @@ def main():
             frame_cpu_ms = (time.perf_counter() - now) * 1000.0
             budget.record_frame_cost(frame_cpu_ms)
 
-            if upgrade_report and upgrade_report.get("granted"):
+            if upgrade_report and upgrade_report.get("checked"):
                 print()
-                print(f"[Organism] GREW -> {upgrade_report['reason']}")
+                verb = "GREW" if upgrade_report.get("granted") else "held"
+                print(f"[Organism] fidelity check ({verb}) -> {upgrade_report['reason']}")
 
             tick_count += 1
             if tick_count % 10 == 0:
-                print(f'\r[Organism] Tick {tick_count}...', end='', flush=True)
+                status = f"[Organism] Tick {tick_count}"
+                if learner is not None:
+                    status += (
+                        f"  loss={learner.validation_loss:.3e}"
+                        f"  gen={learner.evolution_runs}"
+                        f"  L{budget.fidelity_level}"
+                    )
+                print(f"\r{status}...", end="", flush=True)
 
             time.sleep(0.03)
 

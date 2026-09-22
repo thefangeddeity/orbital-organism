@@ -42,6 +42,7 @@ class NeuralLearner(Lego):
         "validation_size": 128,
         "save_every": 100,
         "max_training_seconds": 0.02,
+        "grad_clip": 5.0,
     }
 
     def __init__(self):
@@ -860,8 +861,39 @@ class NeuralLearner(Lego):
             axis=0,
         )
 
+        # Global-norm gradient clipping. This hand-rolled MLP has no
+        # batch normalization and trains on unnormalized, heterogeneous
+        # -scale AU inputs (Mercury ~0.4 AU next to Neptune ~30 AU in
+        # the same batch) for hundreds of unclipped SGD steps -- exactly
+        # the conditions that blow a plain ReLU net up to astronomical
+        # weight values within the first few steps. Clipping the
+        # combined gradient norm preserves direction while bounding
+        # magnitude, the standard fix for this failure mode.
+        clip = float(self.parameters.get("grad_clip", 5.0))
+
+        grads = [dw1, db1, dw2, db2, dw3, db3]
+
+        total_norm = math.sqrt(
+            sum(float(np.sum(g * g)) for g in grads)
+        )
+
+        if total_norm > clip and total_norm > 0.0:
+            scale = clip / total_norm
+            dw1, db1, dw2, db2, dw3, db3 = (g * scale for g in grads)
+
         lr = float(
             self.parameters["learning_rate"]
+        )
+
+        # Transactional step: snapshot, apply, and only commit if the
+        # result is still finite -- same rollback-on-failure philosophy
+        # as self-evolution's candidate mutations, applied here to
+        # ordinary gradient steps as the last line of defense against
+        # a step that still diverges despite clipping.
+        pre_step = (
+            self.w1.copy(), self.b1.copy(),
+            self.w2.copy(), self.b2.copy(),
+            self.w3.copy(), self.b3.copy(),
         )
 
         self.w3 -= lr * dw3
@@ -872,6 +904,13 @@ class NeuralLearner(Lego):
 
         self.w1 -= lr * dw1
         self.b1 -= lr * db1
+
+        if not all(
+            np.all(np.isfinite(w))
+            for w in (self.w1, self.b1, self.w2, self.b2, self.w3, self.b3)
+        ):
+            self.w1, self.b1, self.w2, self.b2, self.w3, self.b3 = pre_step
+            return
 
         self.training_steps += 1
         self.last_loss = loss
@@ -1027,30 +1066,41 @@ class NeuralLearner(Lego):
 
             network = payload["network"]
 
-            self.w1 = np.asarray(
-                network["w1"],
-                dtype=float,
+            loaded_w1 = np.asarray(network["w1"], dtype=float)
+            loaded_b1 = np.asarray(network["b1"], dtype=float)
+            loaded_w2 = np.asarray(network["w2"], dtype=float)
+            loaded_b2 = np.asarray(network["b2"], dtype=float)
+            loaded_w3 = np.asarray(network["w3"], dtype=float)
+            loaded_b3 = np.asarray(network["b3"], dtype=float)
+
+            loaded_weights = (
+                loaded_w1, loaded_b1,
+                loaded_w2, loaded_b2,
+                loaded_w3, loaded_b3,
             )
-            self.b1 = np.asarray(
-                network["b1"],
-                dtype=float,
+
+            # A weight saved from a run that diverged before gradient
+            # clipping existed (or any other future bug) must not get a
+            # second life just because it made it to disk. Persisted
+            # state is trusted only if it's finite and within a sane
+            # magnitude -- otherwise this is treated exactly like a
+            # version mismatch: start a fresh network rather than
+            # resume from known-bad weights.
+            MAX_SANE_WEIGHT = 1.0e4
+
+            sane = all(
+                np.all(np.isfinite(w)) and np.all(np.abs(w) < MAX_SANE_WEIGHT)
+                for w in loaded_weights
             )
-            self.w2 = np.asarray(
-                network["w2"],
-                dtype=float,
-            )
-            self.b2 = np.asarray(
-                network["b2"],
-                dtype=float,
-            )
-            self.w3 = np.asarray(
-                network["w3"],
-                dtype=float,
-            )
-            self.b3 = np.asarray(
-                network["b3"],
-                dtype=float,
-            )
+
+            if not sane:
+                self._initialize_network()
+                self.training_steps = 0
+                self.best_loss = float("inf")
+                self.validation_loss = float("inf")
+                return
+
+            self.w1, self.b1, self.w2, self.b2, self.w3, self.b3 = loaded_weights
 
             self.training_steps = int(
                 payload.get(
