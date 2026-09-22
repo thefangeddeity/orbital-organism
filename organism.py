@@ -394,12 +394,20 @@ def main():
             axis.pane.set_facecolor((*NAVY_BG, 1.0))
             axis.pane.set_edgecolor((*PHOSPHOR, edge_alpha))
 
+            # The axis spines default to literal 'black' in _axinfo,
+            # which on a navy background reads as visible dark lines
+            # rather than as nothing -- that's the stray line crossing
+            # the lower scene. Folded into the same 'g' toggle as the
+            # rest of the reference frame instead of left hardcoded.
+            axis.line.set_color((*PHOSPHOR, edge_alpha))
+
             # mplot3d hardcodes '#b0b0b0' in the pane's private _axinfo
             # dict and ignores ax.grid()'s color/alpha kwargs entirely --
             # this is the actual fix, not just a dimmer number.
             try:
                 axis._axinfo["grid"]["color"] = (*PHOSPHOR, grid_alpha)
                 axis._axinfo["grid"]["linewidth"] = 0.3
+                axis._axinfo["axisline"]["color"] = (*PHOSPHOR, edge_alpha)
             except (AttributeError, KeyError):
                 pass
 
