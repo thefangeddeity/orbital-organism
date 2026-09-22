@@ -68,6 +68,17 @@ class NeuralLearner(Lego):
 
         self.training_steps = 0
         self.best_loss = float("inf")
+        # Tracked SEPARATELY from best_loss, on the fixed REFERENCE_METRIC
+        # rather than whatever loss is currently active -- an unconstrained
+        # scratch-tree core has no non-negativity guarantee, so best_loss
+        # itself can go negative (confirmed live: it did), which then
+        # permanently zeroes OrganicBudget's own improvement calculation
+        # (it treats a <=0 baseline as "no comparable signal" and reports
+        # 0% forever after). OrganicBudget.consider_upgrade() is fed this
+        # instead of best_loss -- same "judge growth on one stable
+        # yardstick, not whatever's currently active" fix already applied
+        # to evaluate_candidate_real() earlier this session.
+        self.best_reference_score = float("inf")
         self.last_loss = float("inf")
         self.validation_loss = float("inf")
         self.last_step_seconds = 0.0
@@ -452,6 +463,10 @@ class NeuralLearner(Lego):
         if not math.isfinite(self.best_loss):
             self.validation_loss = self._validation_loss()
             self.best_loss = self.validation_loss
+            self._save_state()
+
+        if not math.isfinite(self.best_reference_score):
+            self.best_reference_score = self._reference_score()
             self._save_state()
 
         # Seed the in-memory success counter from self_program.json's
@@ -1481,6 +1496,10 @@ class NeuralLearner(Lego):
                 self.validation_loss
             )
 
+        reference_score = self._reference_score()
+        if reference_score < self.best_reference_score:
+            self.best_reference_score = reference_score
+
         save_every = int(
             self.parameters[
                 "save_every"
@@ -1509,6 +1528,7 @@ class NeuralLearner(Lego):
             "version": self.version,
             "training_steps": self.training_steps,
             "best_loss": self.best_loss,
+            "best_reference_score": self.best_reference_score,
             "validation_loss": self.validation_loss,
             "parameters": dict(
                 self.parameters
@@ -1608,6 +1628,13 @@ class NeuralLearner(Lego):
             self.best_loss = float(
                 payload.get(
                     "best_loss",
+                    float("inf"),
+                )
+            )
+
+            self.best_reference_score = float(
+                payload.get(
+                    "best_reference_score",
                     float("inf"),
                 )
             )

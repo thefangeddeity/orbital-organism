@@ -1168,9 +1168,16 @@ def main():
                 learning_result = learner.observe(result)
 
                 if learner.evolution_runs > evolution_runs_before:
+                    # best_reference_score, not best_loss -- best_loss is
+                    # tracked under whatever loss is CURRENTLY active,
+                    # which an unconstrained scratch-tree core can push
+                    # negative (confirmed live). A fidelity-growth gate
+                    # needs a fixed, always-non-negative yardstick, the
+                    # same reasoning evaluate_candidate_real() already
+                    # applies to its own accept/reject decisions.
                     upgrade_report = budget.consider_upgrade(
                         learner.evolution_runs,
-                        learner.best_loss,
+                        learner.best_reference_score,
                     )
 
                 # Cheap enough to call every tick (an integer compare
