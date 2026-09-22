@@ -276,8 +276,44 @@ class NeuralLearner(Lego):
         try:
             data = self._read_json(self.self_program_path)
             self.evolution_runs = int(data.get("accepted", 0))
+            self._replay_accepted_variants(data.get("commands", []))
         except Exception:
             pass
+
+    def _replay_accepted_variants(self, commands: list[str]) -> None:
+        """
+        Reconstruct which loss/feature/activation variant was actually
+        active when the process last shut down.
+
+        This was a real gap: active_loss_variant etc. were never saved
+        or loaded at all, so every restart silently reset to mse/basic
+        /relu even after self-evolution had accepted something better
+        -- discovered when a live run had already accepted
+        switch_loss_huber (self_program.json: generation 3, accepted
+        1) but a fresh boot would have started back at mse regardless.
+
+        Deliberately does NOT reuse apply_self_program() here: that
+        also handles the parameter-delta commands (learning_rate,
+        hidden_width, batch_size), which are already correctly
+        captured in the persisted `parameters` dict via _load_state().
+        Replaying those too would double-apply the scaling and, for
+        hidden_width, re-trigger _initialize_network() and destroy the
+        weights that were just correctly loaded. Only the pure
+        variant-switch commands are safe to replay verbatim.
+        """
+        for command in commands:
+            if command.startswith("switch_loss_"):
+                name = command.replace("switch_loss_", "")
+                if name in self.LOSS_VARIANTS:
+                    self.active_loss_variant = name
+            elif command.startswith("switch_features_"):
+                name = command.replace("switch_features_", "")
+                if name in self.FEATURE_VARIANTS:
+                    self.active_feature_variant = name
+            elif command.startswith("switch_activation_"):
+                name = command.replace("switch_activation_", "")
+                if name in self.ACTIVATION_VARIANTS:
+                    self.active_activation_variant = name
 
     # ------------------------------------------------------------------
     # Neural network
