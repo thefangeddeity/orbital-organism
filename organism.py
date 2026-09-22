@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -19,6 +20,7 @@ from modules.registry import ModuleRegistry
 from modules.organic_budget import OrganicBudget, FIDELITY_LEVELS
 from modules.compute_provider import build_providers
 from modules.real_systems import build_world
+from modules.loss_blocks import CORE_PENALTIES, WEIGHTINGS
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -349,6 +351,74 @@ def main():
 
     fig.canvas.mpl_connect("key_press_event", _on_key)
 
+    # Selective dispatch to Tanzania: "worth sending" means local
+    # evolution has actually stalled, not a blind schedule. Local
+    # search tries exactly one mutation per cycle; once it's gone
+    # PLATEAU_GENERATIONS cycles without a single accepted one, a wide
+    # 72-combination sweep (tools/dispatch_tanzania.py) is exactly the
+    # kind of search local can't afford to run itself, so it becomes
+    # worth the SSH round-trip.
+    #
+    # Fired as a detached, non-blocking subprocess -- Popen without
+    # .wait() returns immediately, so this never stalls the render
+    # loop the way an inline SSH call would. Guarded against firing
+    # twice concurrently (checks the previous Popen's poll()) and
+    # rate-limited (DISPATCH_COOLDOWN_SECONDS) so a persistent plateau
+    # doesn't spam Tanzania with an identical sweep every single cycle.
+    #
+    # Both fixed for now, but this is exactly the kind of decision the
+    # organism should eventually make for itself rather than have
+    # imposed on it: how stalled is "stalled enough to be worth
+    # offloading" and how often is "worth asking again" are judgment
+    # calls it could in principle learn from its own history --  how
+    # often a sweep actually finds something, how long Tanzania
+    # sweeps take, how much local progress happens per generation.
+    # Self-tuning its own offload policy, the same way it already
+    # self-tunes its hyperparameters.
+    PLATEAU_GENERATIONS = 15
+    DISPATCH_COOLDOWN_SECONDS = 600.0
+
+    dispatch_state = {"process": None, "last_dispatch_time": 0.0}
+
+    def _maybe_dispatch_to_tanzania(learner, now_seconds):
+        stalled = learner.generations_since_accepted >= PLATEAU_GENERATIONS
+
+        if not stalled:
+            return
+
+        in_flight = (
+            dispatch_state["process"] is not None
+            and dispatch_state["process"].poll() is None
+        )
+        if in_flight:
+            return
+
+        cooling_down = (
+            now_seconds - dispatch_state["last_dispatch_time"]
+            < DISPATCH_COOLDOWN_SECONDS
+        )
+        if cooling_down:
+            return
+
+        dispatch_script = (
+            Path(__file__).resolve().parent / "tools" / "dispatch_tanzania.py"
+        )
+
+        print()
+        print(
+            f"[Organism] local evolution stalled "
+            f"({learner.generations_since_accepted} generations without "
+            f"an accepted mutation) -- dispatching a wide sweep to Tanzania"
+        )
+
+        dispatch_state["process"] = subprocess.Popen(
+            [sys.executable, str(dispatch_script), "explore_mutation_space"],
+            cwd=str(dispatch_script.parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        dispatch_state["last_dispatch_time"] = now_seconds
+
     def _sphere_mesh(cx, cy, cz, radius, resolution=10):
         u = np.linspace(0, 2 * np.pi, resolution)
         v = np.linspace(0, np.pi, resolution)
@@ -640,7 +710,17 @@ def main():
 
         return y
 
-        return y - 0.10
+    # Cores as columns, weightings as rows -- 6x4, replacing the old
+    # 4x3 (loss-name x activation) grid now that the composer covers
+    # 24 loss combinations instead of 4. Short, real abbreviations,
+    # not truncation -- loss_name[:4] used to produce "hube"/"weig",
+    # which read as typos rather than intentional shortenings.
+    SWEEP_CORE_ORDER = list(CORE_PENALTIES.keys())
+    SWEEP_WEIGHTING_ORDER = list(WEIGHTINGS.keys())
+    SWEEP_CORE_SHORT = {
+        "square": "sqr", "absolute": "abs", "huber": "hbr",
+        "logcosh": "lgc", "quartic": "qrt", "pseudohuber": "phb",
+    }
 
     def _render_sweep_grid(y_top):
         # Honest about what it can show: dispatch_tanzania.py runs as a
@@ -653,47 +733,61 @@ def main():
         if not (latest_result and latest_result.get("results")):
             return y_top
 
-        LOSS_ORDER = ["mse", "mae", "huber", "weighted_mse"]
-        ACTIVATION_ORDER = ["relu", "gelu", "tanh"]
+        # reference_score is the fair, comparable-across-cores metric
+        # (added alongside the composer); validation_loss is each
+        # combination's own native value, which mixes units across
+        # cores -- the same bug just fixed for the actual accept/reject
+        # decision, present here too until now. Fall back to it only
+        # for result files written before reference_score existed.
+        best_per_cell = {}
+        for r in latest_result["results"]:
+            score = r.get("reference_score", r.get("validation_loss"))
+            if score is None or not math.isfinite(score):
+                continue
 
-        scored = {
-            (r["loss_variant"], r["activation_variant"]): r["validation_loss"]
-            for r in latest_result["results"]
-            if math.isfinite(r["validation_loss"])
-        }
+            loss_variant = r["loss_variant"]
+            core, _, weighting = loss_variant.partition("/")
+            if not weighting:
+                # Legacy single-name result (pre-composer): can't be
+                # placed on the core x weighting grid at all.
+                continue
 
-        if not scored:
+            key = (core, weighting)
+            if key not in best_per_cell or score < best_per_cell[key]:
+                best_per_cell[key] = score
+
+        if not best_per_cell:
             return y_top
 
-        # Log scale: these losses span 4 orders of magnitude (0.07 to
-        # 1500+ once a bad pairing diverges). A linear scale gets
-        # dominated by the outlier and makes every reasonable
-        # combination look identically "best".
+        # Log scale: reference scores can still span orders of
+        # magnitude once a bad core/activation pairing diverges. A
+        # linear scale gets dominated by the outlier and makes every
+        # reasonable combination look identically "best".
         log_scored = {
             key: math.log(max(value, 1e-12))
-            for key, value in scored.items()
+            for key, value in best_per_cell.items()
         }
         lo = min(log_scored.values())
         hi = max(log_scored.values())
         span = (hi - lo) or 1.0
 
-        _caption(right_ax, 0.05, y_top, "LAST SWEEP")
+        _caption(right_ax, 0.05, y_top, "LAST SWEEP (best per cell)")
 
         # Clearance below the label's own text height -- at 0.030 the
-        # first row was drawn straight through "LAST SWEEP".
+        # first row was drawn straight through the caption.
         grid_top = y_top - 0.042
         grid_left = 0.05
-        cell_w = 0.90 / len(LOSS_ORDER)
+        cell_w = 0.90 / len(SWEEP_CORE_ORDER)
         # Sized so the third extension (Ariana) still fits inside the
-        # panel -- at 0.036 its role line overflowed past the bottom
+        # panel -- a taller grid pushed its role line past the bottom
         # bracket. The grid reads fine at this size; a machine falling
         # off the panel entirely does not.
-        cell_h = 0.025
-        gap = 0.005
+        cell_h = 0.022
+        gap = 0.004
 
-        for col, loss_name in enumerate(LOSS_ORDER):
-            for row, activation_name in enumerate(ACTIVATION_ORDER):
-                key = (loss_name, activation_name)
+        for col, core in enumerate(SWEEP_CORE_ORDER):
+            for row, weighting in enumerate(SWEEP_WEIGHTING_ORDER):
+                key = (core, weighting)
                 x = grid_left + col * cell_w
                 y = grid_top - row * (cell_h + gap)
 
@@ -714,20 +808,11 @@ def main():
                     Rectangle((x, y), cell_w - gap, cell_h, color=color)
                 )
 
-        # Horizontal, not rotated (rotated 5.5pt was unreadable), and
-        # abbreviated deliberately rather than truncated mid-word --
-        # loss_name[:4] produced "hube" and "weig", which read as typos.
-        SHORT_NAME = {
-            "mse": "mse",
-            "mae": "mae",
-            "huber": "huber",
-            "weighted_mse": "w-mse",
-        }
-        label_y = grid_top - len(ACTIVATION_ORDER) * (cell_h + gap) - 0.006
-        for col, loss_name in enumerate(LOSS_ORDER):
+        label_y = grid_top - len(SWEEP_WEIGHTING_ORDER) * (cell_h + gap) - 0.006
+        for col, core in enumerate(SWEEP_CORE_ORDER):
             right_ax.text(
                 grid_left + col * cell_w + (cell_w - gap) / 2,
-                label_y, SHORT_NAME.get(loss_name, loss_name),
+                label_y, SWEEP_CORE_SHORT.get(core, core[:3]),
                 color=PHOSPHOR, fontsize=FS_CAPTION,
                 alpha=0.6, ha="center", va="top",
             )
@@ -736,7 +821,7 @@ def main():
         # unreadable without knowing what they meant.
         right_ax.text(
             grid_left, label_y - 0.026,
-            "rows: " + " / ".join(ACTIVATION_ORDER),
+            "rows: " + " / ".join(SWEEP_WEIGHTING_ORDER),
             color=PHOSPHOR, fontsize=FS_CAPTION,
             alpha=A_SECONDARY, va="top",
         )
@@ -837,6 +922,12 @@ def main():
                         learner.evolution_runs,
                         learner.best_loss,
                     )
+
+                # Cheap enough to call every tick (an integer compare
+                # and a Popen.poll(), not an SSH call) -- the plateau
+                # counter itself only actually changes once every
+                # evolution_interval observations.
+                _maybe_dispatch_to_tanzania(learner, now)
 
             bodies = result.observations["bodies"]
 

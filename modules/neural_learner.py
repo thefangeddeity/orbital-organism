@@ -96,6 +96,7 @@ class NeuralLearner(Lego):
         # Track evolution genealogy
         self.code_variants_tried = []
         self.evolution_success_rate = 0.0
+        self.generations_since_accepted = 0
 
     # ================================================================
     # CODE VARIANT LIBRARY
@@ -289,6 +290,9 @@ class NeuralLearner(Lego):
             data = self._read_json(self.self_program_path)
             self.evolution_runs = int(data.get("accepted", 0))
             self.evolution_success_rate = float(data.get("success_rate", 0.0))
+            self.generations_since_accepted = int(
+                data.get("generations_since_accepted", 0)
+            )
             self._replay_accepted_variants(data.get("commands", []))
         except Exception:
             pass
@@ -880,6 +884,19 @@ class NeuralLearner(Lego):
             + accepted_count
         )
 
+        # Plateau tracking: how many generations since the last accepted
+        # mutation. Local search tries exactly one candidate per cycle
+        # (a single parameter/variant change) -- this is the signal
+        # that hill-climbing has stalled and a wider search (more than
+        # one cycle could ever afford to try) might actually be worth
+        # dispatching somewhere with real spare compute.
+        if accepted:
+            generations_since_accepted = 0
+        else:
+            generations_since_accepted = (
+                int(data.get("generations_since_accepted", 0)) + 1
+            )
+
         # Track genealogy
         self.code_variants_tried.append({
             "generation": generation,
@@ -908,8 +925,11 @@ class NeuralLearner(Lego):
                 "success_rate": float(
                     self.evolution_success_rate
                 ),
+                "generations_since_accepted": generations_since_accepted,
             },
         )
+
+        self.generations_since_accepted = generations_since_accepted
 
         return {
             "generation": generation,
@@ -919,6 +939,7 @@ class NeuralLearner(Lego):
             "baseline": float(
                 self.validation_loss
             ),
+            "generations_since_accepted": generations_since_accepted,
         }
 
     # ================================================================
