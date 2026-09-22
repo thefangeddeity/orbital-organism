@@ -5,6 +5,7 @@ import json
 import math
 import subprocess
 import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from modules.organic_budget import OrganicBudget, FIDELITY_LEVELS
 from modules.compute_provider import build_providers
 from modules.real_systems import build_world
 from modules.loss_blocks import CORE_PENALTIES, WEIGHTINGS
+from modules.scratch_blocks import BLOCKS as SCRATCH_BLOCKS, to_expr_string
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -57,6 +59,25 @@ def load_config():
         encoding="utf-8-sig",
     ) as f:
         return json.load(f)
+
+
+# Dashboard panel content width, in characters -- content past this
+# wraps instead of running past the panel border or getting silently
+# truncated. Sized for the left panel's fixed pixel width at the
+# dashboard's font size; the panel doesn't currently resize, so a
+# static width is fine.
+DASHBOARD_WRAP_WIDTH = 44
+
+
+def _wrap_labeled(label: str, text: str, indent: str = "    ") -> list[str]:
+    wrapped = textwrap.wrap(
+        text,
+        width=DASHBOARD_WRAP_WIDTH,
+        initial_indent=label,
+        subsequent_indent=indent,
+    )
+    return wrapped if wrapped else [label.rstrip()]
+
 
 def main():
 
@@ -1414,6 +1435,47 @@ def main():
                 "",
                 "modules: " + ", ".join(registry.active()),
             ])
+
+            # Scratch block vocabulary + the most recent proposal's
+            # real outcome -- previously dead space below the modules
+            # line. History comes from state/scratch_history.json,
+            # written by neural_learner.py's _log_scratch_history() and
+            # also what tools/propose_scratch_tree.py reads to build a
+            # digest for its next Gemini prompt (see that module's
+            # docstring) -- this panel is a window onto the same file,
+            # not a separate source of truth.
+            unary_ops = sorted(
+                name for name, spec in SCRATCH_BLOCKS.items() if spec[0] == 1
+            )
+            binary_ops = sorted(
+                name for name, spec in SCRATCH_BLOCKS.items() if spec[0] == 2
+            )
+            lines.extend(["", "SCRATCH"])
+            lines.extend(_wrap_labeled("  vocab(1): ", ", ".join(unary_ops)))
+            lines.extend(_wrap_labeled("  vocab(2): ", ", ".join(binary_ops)))
+
+            scratch_history = []
+            if learner is not None and learner.state_path is not None:
+                history_path = learner.state_path.parent / "scratch_history.json"
+                try:
+                    scratch_history = json.loads(
+                        history_path.read_text(encoding="utf-8")
+                    )
+                except Exception:
+                    scratch_history = []
+
+            if scratch_history:
+                last_scratch_entry = scratch_history[-1]
+                verdict = (
+                    "accepted" if last_scratch_entry.get("accepted") else "rejected"
+                )
+                expr = to_expr_string(last_scratch_entry.get("tree", {}))
+                lines.append(
+                    f"  last: [{last_scratch_entry.get('source', '?')}] {verdict}"
+                )
+                lines.extend(_wrap_labeled("    ", expr))
+            else:
+                lines.append("  last: none proposed yet")
 
             dashboard_ax.text(
                 0.05, 0.88, "\n".join(lines),

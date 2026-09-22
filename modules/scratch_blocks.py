@@ -168,6 +168,23 @@ def const(value: float) -> dict:
     return {"const": float(value)}
 
 
+def to_expr_string(tree: dict) -> str:
+    """
+    Compact, human-readable rendering of a tree -- e.g.
+    div(square(e), sqrt(add(1, square(e)))) -- for display (dashboard,
+    logs), not for parsing anything back. Never used on the validation/
+    evaluation path; a display bug here can't affect what's trusted.
+    """
+    if "op" in tree:
+        args = ", ".join(to_expr_string(a) for a in tree["args"])
+        return f"{tree['op']}({args})"
+    if "var" in tree:
+        return str(tree["var"])
+    if "const" in tree:
+        return f"{tree['const']:.3g}"
+    return "?"
+
+
 # ======================================================================
 # VALIDATION
 #

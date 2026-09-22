@@ -100,6 +100,14 @@ class NeuralLearner(Lego):
         # proposed core, use the named one instead".
         self.active_scratch_tree: dict | None = None
 
+        # What _propose_scratch_core() actually tried this cycle --
+        # {"tree", "source"} or None. Deliberately NOT part of
+        # snapshot_state()/restore_state(): a rejected candidate's
+        # active_scratch_tree gets rolled back, but we still want to
+        # know what was attempted and that it lost, so self_evolve()
+        # can log it to scratch_history.json regardless of outcome.
+        self._last_scratch_attempt: dict | None = None
+
         # Track evolution genealogy
         self.code_variants_tried = []
         self.evolution_success_rate = 0.0
@@ -265,10 +273,13 @@ class NeuralLearner(Lego):
         means this particular mutation attempt is a no-op, same as any
         other candidate that doesn't pass evaluate_candidate_real().
         """
-        tree = self._consume_offline_scratch_proposal()
+        consumed = self._consume_offline_scratch_proposal()
 
-        if tree is None:
+        if consumed is not None:
+            tree, source = consumed
+        else:
             tree = scratch_blocks.random_candidate_tree(self.rng, max_ops=3)
+            source = "local_random"
 
         # A representative range of residuals to check the gradient
         # over, not the live batch -- this only needs to catch
@@ -286,9 +297,13 @@ class NeuralLearner(Lego):
             return False
 
         self.active_scratch_tree = tree
+        # Recorded regardless of what evaluate_candidate_real() decides
+        # next -- see the __init__ comment on why this survives a
+        # rollback that active_scratch_tree itself doesn't.
+        self._last_scratch_attempt = {"tree": tree, "source": source}
         return True
 
-    def _consume_offline_scratch_proposal(self) -> dict | None:
+    def _consume_offline_scratch_proposal(self) -> tuple[dict, str] | None:
         """
         Picks up a tree left by tools/propose_scratch_tree.py, if a
         fresh, unconsumed one is waiting. That tool runs offline
@@ -339,7 +354,56 @@ class NeuralLearner(Lego):
         except OSError:
             pass
 
-        return tree
+        source = data.get("source") or "offline_unknown"
+        return tree, source
+
+    def _log_scratch_history(
+        self, attempt: dict, accepted: bool, score: float, generation: int
+    ) -> None:
+        """
+        Records a scratch-tree proposal's real outcome -- closes the
+        loop tools/propose_scratch_tree.py's Gemini prompt was missing:
+        without this, every Gemini call was stateless, with no way to
+        know what it had already proposed or whether any of it helped.
+        That tool reads this same file to build a digest for its next
+        prompt.
+
+        Only called for attempts that passed validation/gradient-check
+        and got a real evaluate_candidate_real() verdict -- a tree
+        rejected for being structurally pathological (~30% of random
+        trees, expected per scratch_blocks.py's own self-test) never
+        reaches here, since that says nothing about the shape being a
+        bad LOSS FUNCTION, just an invalid expression.
+        """
+        if self.state_path is None:
+            return
+
+        history_path = self.state_path.parent / "scratch_history.json"
+
+        try:
+            history = self._read_json(history_path)
+            if not isinstance(history, list):
+                history = []
+        except Exception:
+            history = []
+
+        history.append({
+            "generation": generation,
+            "tree": attempt["tree"],
+            "source": attempt["source"],
+            "accepted": bool(accepted),
+            "score": float(score) if math.isfinite(score) else None,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        })
+
+        history = history[-self.MAX_SCRATCH_HISTORY:]
+
+        try:
+            temp = history_path.with_suffix(".tmp")
+            temp.write_text(json.dumps(history, indent=2), encoding="utf-8")
+            temp.replace(history_path)
+        except OSError:
+            pass
 
     def _set_loss_weighting(self, weighting: str) -> None:
         current = loss_blocks.from_name(self.active_loss_variant)
@@ -759,6 +823,11 @@ class NeuralLearner(Lego):
     # tools/remote_runner.py.
     LOCAL_CANDIDATE_TRAIN_STEPS = 12
 
+    # Bounds scratch_history.json -- oldest entries drop first. Recent
+    # results are what an offline proposer can actually act on; an
+    # unbounded log isn't more useful and would grow forever.
+    MAX_SCRATCH_HISTORY = 50
+
     SELF_PROGRAM_PARAMETERS = {
         "learning_rate_scale": 1.0,
         "hidden_width_delta": 0,
@@ -1096,6 +1165,12 @@ class NeuralLearner(Lego):
         """
         self._initialize_self_program()
 
+        # Cleared before every cycle so a later check of this attribute
+        # can only ever reflect THIS candidate's attempt, never a stale
+        # one left over from a previous cycle that didn't propose a
+        # scratch core at all.
+        self._last_scratch_attempt = None
+
         candidate = self.candidate_program()
 
         # Real transactional validation
@@ -1120,6 +1195,11 @@ class NeuralLearner(Lego):
             int(data.get("accepted", 0))
             + accepted_count
         )
+
+        if self._last_scratch_attempt is not None:
+            self._log_scratch_history(
+                self._last_scratch_attempt, accepted, score, generation
+            )
 
         # Plateau tracking: how many generations since the last accepted
         # mutation. Local search tries exactly one candidate per cycle
