@@ -1,0 +1,55 @@
+﻿{
+    "organism": {
+        "name": "Orbital Organism",
+        "version": "0.2"
+    },
+
+    "modules": {
+        "neural_learner": {
+            "enabled": true,
+            "parameters": {
+                "enabled": true,
+                "hidden_width": 24,
+                "learning_rate": 0.003,
+                "batch_size": 32,
+                "steps_per_cycle": 4,
+                "validation_size": 128,
+                "save_every": 100,
+                "max_training_seconds": 0.02
+            }
+        },
+
+        "orbit_observer": {
+            "enabled": true,
+
+            "parameters": {
+                "display": true,
+                "simulation_days_per_second": 2.0,
+                "trail_length": 1000
+            },
+
+            "budget": {
+                "cpu_seconds": 0.25,
+                "memory_mb": 128,
+                "wall_seconds": 0.25
+            }
+        }
+    },
+
+    "providers": {
+        "local_cpu": {
+            "enabled": true
+        },
+
+        "tanzania": {
+            "enabled": false,
+            "address": null
+        },
+
+        "tina": {
+            "enabled": false,
+            "address": null
+        }
+    }
+}
+
