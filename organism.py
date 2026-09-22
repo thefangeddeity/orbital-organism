@@ -16,6 +16,7 @@ sys.path.insert(0, str(MODULE_DIR))
 from modules.registry import ModuleRegistry
 from modules.organic_budget import OrganicBudget, FIDELITY_LEVELS
 from modules.compute_provider import build_providers
+from modules.real_systems import build_world
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -75,6 +76,14 @@ def main():
 
     config = load_config()
 
+    world_mode = config.get("world", {}).get("mode", "solar_system")
+    world = build_world(sim, world_mode)
+
+    print(
+        f"World: {getattr(world, 'label', 'Solar System')} "
+        f"(mode={world_mode})"
+    )
+
     registry = ModuleRegistry(
         MODULE_DIR
     )
@@ -92,7 +101,7 @@ def main():
         config["modules"]["orbit_observer"]["parameters"],
     )
 
-    observer.attach_simulator(sim)
+    observer.attach_simulator(world)
 
     learner = None
 
@@ -106,7 +115,7 @@ def main():
             config["modules"]["neural_learner"]["parameters"],
         )
 
-        learner.attach_simulator(sim)
+        learner.attach_simulator(world)
 
     print()
     print("ACTIVE LEGOS")
@@ -126,7 +135,7 @@ def main():
 
     budget = OrganicBudget(
         config.get("organic_budget", {}),
-        body_count=len(sim.PLANETS),
+        body_count=len(world.PLANETS),
     )
 
     print()
@@ -166,7 +175,7 @@ def main():
     # Persistent visual trails belong to the renderer, not the simulator.
     render_trails = {
         body.name: []
-        for body in sim.PLANETS
+        for body in world.PLANETS
     }
 
     # Manual zoom is a multiplier on the auto-fit cube extent computed
@@ -221,9 +230,9 @@ def main():
 
         for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
             pane.set_facecolor((0.0, 0.0, 0.0, 1.0))
-            pane.set_edgecolor((*PHOSPHOR, 0.05))
+            pane.set_edgecolor((*PHOSPHOR, 0.02))
 
-        ax.grid(True, color=PHOSPHOR, alpha=0.06, linewidth=0.4)
+        ax.grid(True, color=PHOSPHOR, alpha=0.025, linewidth=0.3)
 
         ax.tick_params(colors=(*PHOSPHOR,))
 
@@ -237,7 +246,7 @@ def main():
         # zoom. That's correct, not a bug: scroll-zoom in close and the
         # real relative sizes (Jupiter dwarfing Mercury, etc.) show up
         # honestly instead of a make-believe uniform scale.
-        return radius_km / sim.AU_KM
+        return radius_km / world.AU_KM
 
     tanzania_provider = providers["tanzania"]
     tanzania_cap_pct = float(
@@ -372,7 +381,7 @@ def main():
 
             positions_3d = {}
 
-            for body in sim.PLANETS:
+            for body in world.PLANETS:
 
 
                 state = bodies.get(body.name)
@@ -380,7 +389,7 @@ def main():
                 if state is None:
                     continue
 
-                orbit = sim.planet_orbit(body)
+                orbit = world.planet_orbit(body)
 
                 path3 = orbit.sample_path_3d(
                     n_points=720
@@ -393,17 +402,17 @@ def main():
                     path3,
                     key=lambda point:
                         (
-                            point[0] / sim.AU_KM - target_x
+                            point[0] / world.AU_KM - target_x
                         ) ** 2
                         +
                         (
-                            point[1] / sim.AU_KM - target_y
+                            point[1] / world.AU_KM - target_y
                         ) ** 2
                 )
 
-                x = best[0] / sim.AU_KM
-                y = best[1] / sim.AU_KM
-                z = best[2] / sim.AU_KM
+                x = best[0] / world.AU_KM
+                y = best[1] / world.AU_KM
+                z = best[2] / world.AU_KM
 
                 positions_3d[body.name] = (x, y, z)
 
@@ -433,27 +442,27 @@ def main():
             # Orbital planes / paths.
             # ----------------------------------------------------------
 
-            for body in sim.PLANETS:
+            for body in world.PLANETS:
 
 
-                orbit = sim.planet_orbit(body)
+                orbit = world.planet_orbit(body)
 
                 points = orbit.sample_path_3d(
                     n_points=360
                 )
 
                 xs = [
-                    point[0] / sim.AU_KM
+                    point[0] / world.AU_KM
                     for point in points
                 ]
 
                 ys = [
-                    point[1] / sim.AU_KM
+                    point[1] / world.AU_KM
                     for point in points
                 ]
 
                 zs = [
-                    point[2] / sim.AU_KM
+                    point[2] / world.AU_KM
                     for point in points
                 ]
 
@@ -498,7 +507,7 @@ def main():
 
             if budget.fidelity_level >= 1:
 
-                sun_radius_au = _visual_radius_au(sim.SUN.radius)
+                sun_radius_au = _visual_radius_au(world.SUN.radius)
 
                 sxs, sys_, szs = _sphere_mesh(
                     0.0, 0.0, 0.0, sun_radius_au,
@@ -513,7 +522,7 @@ def main():
 
                 body_by_name = {
                     body.name: body
-                    for body in sim.PLANETS
+                    for body in world.PLANETS
                 }
 
                 for name, position in positions_3d.items():

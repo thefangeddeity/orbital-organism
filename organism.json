@@ -4,6 +4,11 @@
         "version": "0.2"
     },
 
+    "world": {
+        "mode": "solar_system",
+        "_available_modes": ["solar_system", "proxima", "alpha_centauri"]
+    },
+
     "modules": {
         "neural_learner": {
             "enabled": true,
