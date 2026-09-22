@@ -319,12 +319,34 @@ def main():
         .get("tanzania", {})
         .get("resource_cap_pct", 100)
     )
+    tanzania_results_dir = (
+        Path(__file__).resolve().parent / "state" / "tanzania_results"
+    )
+
+    def _tanzania_dispatch_history():
+        # tools/dispatch_tanzania.py runs as a completely separate
+        # process, out-of-band from this render loop -- the live
+        # organism has no in-memory way to know a dispatch happened.
+        # Its only record is the result files it writes to disk, so
+        # that's what this reads. A real count, not a running-total
+        # this process tracked itself.
+        if not tanzania_results_dir.exists():
+            return 0, None
+
+        result_files = sorted(
+            tanzania_results_dir.glob("*.json"),
+            key=lambda p: p.stat().st_mtime,
+        )
+
+        if not result_files:
+            return 0, None
+
+        latest = result_files[-1]
+        task_name = latest.stem.rsplit("-", 2)[0]
+
+        return len(result_files), task_name
 
     def _render_tanzania_panel():
-        # Honest stub: Tanzania has no real transport yet, so this shows
-        # its true current state (offline, nothing dispatched) rather
-        # than fabricated activity. The moment dispatch() actually sends
-        # work there, this panel is where that shows up live.
         tanzania_ax.clear()
         tanzania_ax.set_facecolor("black")
 
@@ -348,16 +370,24 @@ def main():
             weight="bold", va="center",
         )
 
+        job_count, last_task = _tanzania_dispatch_history()
+
         info_lines = [
             f"status: {'ONLINE' if online else 'OFFLINE'}",
             f"role: {tanzania_provider.role or 'n/a'}",
             f"addr: {tanzania_provider.address or 'unconfigured'}",
             "",
             "DISPATCH",
-            "  jobs sent: 0",
-            "  (running local-cpu",
-            "   until wired)",
+            f"  jobs sent: {job_count}",
         ]
+
+        if last_task:
+            info_lines.append(f"  last: {last_task}")
+        else:
+            info_lines.extend([
+                "  (none yet -- run",
+                "   tools/dispatch_tanzania.py)",
+            ])
 
         tanzania_ax.text(
             0.06, 0.86, "\n".join(info_lines),

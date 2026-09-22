@@ -1,5 +1,8 @@
 ﻿from __future__ import annotations
 
+import subprocess
+import threading
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Callable
 
@@ -58,19 +61,28 @@ class LocalCPUProvider(ComputeProvider):
 
 class RemoteProvider(ComputeProvider):
     """
-    Placeholder for future remote workers (Tanzania, Tina, Ariana).
+    Remote worker reachable over SSH (Tanzania, Tina, Ariana -- host
+    aliases already configured in ~/.ssh/config, key-based, no
+    password).
 
-    No network protocol is assumed yet.
+    available() runs a real reachability check ('ssh <name> echo ok'),
+    but never inline: this is called from organism.py's dashboard
+    render every frame, and a blocking SSH round-trip there would
+    freeze the renderer. Instead the check runs in a background daemon
+    thread on a cooldown, and available() always returns instantly
+    from a cached result -- correct-eventually, never blocking.
 
-    A future Lego can implement execute() using SSH,
-    a local HTTP service, a Unix socket, or another protocol
-    without changing the learning engine.
-
-    available() deliberately returns False until a real reachability
-    check (ping, SSH handshake, HTTP health check) is implemented.
-    Until then, dispatch() always falls through to local-cpu -- the
-    organism runs correctly with zero remote workers online.
+    execute() deliberately stays unimplemented for the live path.
+    Real dispatch happens through tools/dispatch_tanzania.py, run
+    out-of-band from the render loop entirely (SSH round-trips are
+    seconds, not milliseconds -- there's no way to fit that inside a
+    frame budget). This class's job is only to answer "is it up" for
+    the dashboard and for dispatch()'s fallback-ordering logic, not to
+    carry live work itself.
     """
+
+    CHECK_INTERVAL_SECONDS = 20.0
+    CHECK_TIMEOUT_SECONDS = 6.0
 
     def __init__(
         self,
@@ -86,9 +98,58 @@ class RemoteProvider(ComputeProvider):
         self.intermittent = intermittent
         self.enabled_in_config = enabled_in_config
 
+        self._cached_available = False
+        self._check_in_progress = False
+        self._last_check_time = 0.0
+        self._lock = threading.Lock()
+
     def available(self) -> bool:
-        # TODO: real reachability check once a transport is chosen.
-        return False
+        if not self.enabled_in_config:
+            # Not a declared fleet member -- never probed, never up.
+            return False
+
+        now = time.monotonic()
+
+        with self._lock:
+            due = (now - self._last_check_time) >= self.CHECK_INTERVAL_SECONDS
+            in_progress = self._check_in_progress
+
+            if due and not in_progress:
+                self._check_in_progress = True
+                should_start = True
+            else:
+                should_start = False
+
+        if should_start:
+            threading.Thread(
+                target=self._check_reachability,
+                daemon=True,
+            ).start()
+
+        return self._cached_available
+
+    def _check_reachability(self) -> None:
+        try:
+            result = subprocess.run(
+                [
+                    "ssh",
+                    "-o", f"ConnectTimeout={int(self.CHECK_TIMEOUT_SECONDS)}",
+                    "-o", "BatchMode=yes",
+                    self.name,
+                    "echo ok",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=self.CHECK_TIMEOUT_SECONDS + 2.0,
+            )
+            reachable = result.returncode == 0 and "ok" in result.stdout
+        except Exception:
+            reachable = False
+
+        with self._lock:
+            self._cached_available = reachable
+            self._last_check_time = time.monotonic()
+            self._check_in_progress = False
 
     def execute(
         self,
@@ -97,7 +158,9 @@ class RemoteProvider(ComputeProvider):
         **kwargs,
     ):
         raise RuntimeError(
-            f"Remote provider '{self.name}' is not enabled."
+            f"Remote provider '{self.name}' has no live execute() path -- "
+            f"use tools/dispatch_tanzania.py for real dispatch, out-of-band "
+            f"from the render loop."
         )
 
 

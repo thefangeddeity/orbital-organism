@@ -59,21 +59,23 @@
         },
 
         "tanzania": {
-            "enabled": false,
+            "enabled": true,
             "address": null,
             "role": "worker: training + code synthesis",
-            "resource_cap_pct": 100
+            "resource_cap_pct": 100,
+            "_note": "Reachable via SSH host alias 'tanzania' (~/.ssh/config, key-based). Real dispatch: tools/dispatch_tanzania.py, run out-of-band from the render loop."
         },
 
         "tina": {
-            "enabled": false,
+            "enabled": true,
             "address": null,
             "role": "worker: validation + backup",
-            "resource_cap_pct": 100
+            "resource_cap_pct": 100,
+            "_note": "SSH host alias 'tina' configured but currently unreachable (DNS did not resolve as of 2026-09-21 -- likely just offline/asleep, not misconfigured)."
         },
 
         "ariana": {
-            "enabled": false,
+            "enabled": true,
             "address": null,
             "role": "opportunistic booster + archival",
             "intermittent": true,
