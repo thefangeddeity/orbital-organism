@@ -268,10 +268,15 @@ def main():
 
         ax.grid(visible)
 
-        ax.tick_params(colors=(*PHOSPHOR,))
+        # Ticks/labels/axis-titles all fold into the same toggle as the
+        # grid and box edges now -- off by default, 'g' brings the whole
+        # scale reference frame back at once, dimmed below full-bright.
+        PHOSPHOR_DIM = (*PHOSPHOR, 0.45 if visible else 0.0)
+
+        ax.tick_params(colors=PHOSPHOR_DIM)
 
         for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
-            axis.label.set_color(PHOSPHOR)
+            axis.label.set_color(PHOSPHOR_DIM)
 
     def _visual_radius_au(radius_km):
         # True-to-scale, deliberately. Bodies are astronomically tiny
