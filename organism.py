@@ -137,6 +137,9 @@ def main():
         config.get("organic_budget", {}),
         body_count=len(world.PLANETS),
     )
+    budget.attach_state_path(
+        Path(__file__).resolve().parent / "state" / "organic_budget.json"
+    )
 
     print()
     print(
@@ -935,6 +938,12 @@ def main():
                 verb = "GREW" if upgrade_report.get("granted") else "held"
                 print(f"[Organism] fidelity check ({verb}) -> {upgrade_report['reason']}")
 
+                if upgrade_report.get("granted"):
+                    # Earned growth is saved the instant it's earned, not
+                    # deferred to graceful shutdown -- a force-killed
+                    # process must not be able to un-earn it.
+                    budget.save_state()
+
             tick_count += 1
 
             # Wall-clock cadence, not tick count -- ticks are a render-
@@ -963,6 +972,8 @@ def main():
 
         for lego in registry.active().values():
             lego.shutdown()
+
+        budget.save_state()
 
         plt.ioff()
         plt.close(fig)

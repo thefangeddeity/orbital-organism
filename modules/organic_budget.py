@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 from typing import Any
 
 
@@ -88,6 +90,63 @@ class OrganicBudget:
         self.last_report: dict[str, Any] = {}
 
         self._loss_at_last_check: float | None = None
+
+        self.state_path: Path | None = None
+
+    # ------------------------------------------------------------------
+    # Persistence
+    #
+    # Fidelity is earned growth, not a preference -- closing the window
+    # must not silently reset it back to whatever organism.json's static
+    # default says. Mirrors NeuralLearner's own state file: same
+    # directory, same atomic tmp-then-replace write.
+    # ------------------------------------------------------------------
+
+    def attach_state_path(self, state_path: Path) -> None:
+        self.state_path = state_path
+        self._load_state()
+
+    def _load_state(self) -> None:
+        if self.state_path is None or not self.state_path.exists():
+            return
+
+        try:
+            payload = json.loads(
+                self.state_path.read_text(encoding="utf-8-sig")
+            )
+
+            loaded_level = int(payload.get("fidelity_level", 0))
+
+            if 0 <= loaded_level <= self.max_fidelity_level:
+                self.fidelity_level = loaded_level
+
+            self.upgrades_granted = int(payload.get("upgrades_granted", 0))
+            self.upgrades_denied = int(payload.get("upgrades_denied", 0))
+
+            loaded_loss = payload.get("loss_at_last_check")
+            if loaded_loss is not None and math.isfinite(loaded_loss):
+                self._loss_at_last_check = float(loaded_loss)
+
+        except (OSError, ValueError, KeyError, TypeError):
+            # A damaged budget state must not block boot -- resume from
+            # whatever organism.json's default says, same fallback
+            # NeuralLearner uses for its own corrupted state.
+            pass
+
+    def save_state(self) -> None:
+        if self.state_path is None:
+            return
+
+        payload = {
+            "fidelity_level": self.fidelity_level,
+            "upgrades_granted": self.upgrades_granted,
+            "upgrades_denied": self.upgrades_denied,
+            "loss_at_last_check": self._loss_at_last_check,
+        }
+
+        temporary = self.state_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temporary.replace(self.state_path)
 
     # ------------------------------------------------------------------
     # Frame-cost tracking
