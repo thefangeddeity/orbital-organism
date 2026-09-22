@@ -204,9 +204,32 @@ def main():
     # _axinfo grid style directly.
     grid_state = {"visible": False}
 
+    # The organism's two clocks (wall-clock age vs. simulated universe
+    # time) are deliberately different rates -- default is fast-forward
+    # (2 sim-days/real-second) so orbits are watchable at all. 't' snaps
+    # back to true real time (1 sim-second per real-second) and back
+    # again, so the relationship never gets lost even though it's not
+    # running at it by default.
+    REAL_TIME_DAYS_PER_SECOND = 1.0 / 86400.0
+    configured_days_per_second = float(
+        config["modules"]["orbit_observer"]["parameters"]
+        ["simulation_days_per_second"]
+    )
+    time_state = {
+        "days_per_second": configured_days_per_second,
+        "real_time": False,
+    }
+
     def _on_key(event):
         if event.key == "g":
             grid_state["visible"] = not grid_state["visible"]
+        elif event.key == "t":
+            time_state["real_time"] = not time_state["real_time"]
+            time_state["days_per_second"] = (
+                REAL_TIME_DAYS_PER_SECOND
+                if time_state["real_time"]
+                else configured_days_per_second
+            )
 
     fig.canvas.mpl_connect("key_press_event", _on_key)
 
@@ -389,10 +412,7 @@ def main():
 
             observer.advance(
                 dt
-                * config["modules"]
-                ["orbit_observer"]
-                ["parameters"]
-                ["simulation_days_per_second"]
+                * time_state["days_per_second"]
                 * 86400.0
             )
 
@@ -849,6 +869,16 @@ def main():
                     f"  t = "
                     f"{observer.time_seconds / 86400.0:,.2f}"
                     f" days"
+                ),
+                (
+                    "  speed: REAL-TIME (1x)"
+                    if time_state["real_time"] else
+                    (
+                        f"  speed: {time_state['days_per_second']:.2f} "
+                        f"sim-days/s "
+                        f"(~{time_state['days_per_second'] * 86400.0:,.0f}x "
+                        f"real time)"
+                    )
                 ),
             ])
 

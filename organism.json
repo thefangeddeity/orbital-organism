@@ -29,7 +29,8 @@
 
             "parameters": {
                 "display": true,
-                "simulation_days_per_second": 2.0,
+                "simulation_days_per_second": 10.0,
+                "_speed_note": "Sized against Proxima d (5.1-day period, tightest orbit in any active world mode): ~13 ticks/orbit at this speed, comfortable margin above aliasing risk for the learner's previous->current position training pairs. Press 't' in the running app to snap to true real-time.",
                 "trail_length": 1000
             },
 
