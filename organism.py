@@ -492,7 +492,7 @@ def main():
                 GRID_WORST = (0.75, 0.2, 0.2)
 
                 tanzania_ax.text(
-                    grid_left, grid_top + 0.035, "LAST SWEEP",
+                    grid_left, grid_top + 0.05, "LAST SWEEP",
                     color=PHOSPHOR, fontsize=6.5, family="monospace",
                     alpha=0.55,
                 )
