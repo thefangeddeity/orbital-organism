@@ -1340,6 +1340,11 @@ def main():
                 (
                     f"  cpu: {budget_state['cpu_ms']:.1f}/"
                     f"{budget_state['cpu_cap_ms']:.0f}ms"
+                    + (
+                        f" ({budget_state['cpu_idle_multiplier']:.1f}x idle)"
+                        if budget_state["cpu_idle_multiplier"] >= 1.05
+                        else ""
+                    )
                 ),
                 (
                     f"  mem: {budget_state['memory_mb']:.1f}/"

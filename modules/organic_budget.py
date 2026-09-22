@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 from typing import Any
+
+try:
+    import psutil
+except ImportError:
+    psutil = None  # idle-headroom scaling degrades to the flat floor cap
 
 
 # ======================================================================
@@ -71,9 +77,26 @@ class OrganicBudget:
 
         self.fidelity_level = int(config.get("fidelity_level", 0))
 
+        # budget_cpu_ms_per_frame is the FLOOR, not a hard ceiling -- the
+        # number this process is guaranteed to have even when the rest
+        # of the machine is busy (it's coordinator+renderer for the
+        # whole fleet; see providers.local_cpu in organism.json, which
+        # is why this stays conservative by default rather than 0).
+        # When the rest of the machine is idle, _idle_headroom_multiplier()
+        # scales it up, toward idle_cpu_multiplier_cap -- "use up to n-1
+        # cores' worth when idle" -- rather than sitting at one fixed
+        # number regardless of what else is happening on the box.
         self.max_cpu_ms_per_frame = float(config.get("budget_cpu_ms_per_frame", 30.0))
         self.max_memory_mb = float(config.get("budget_memory_mb", 256.0))
         self.max_fidelity_level = int(config.get("max_fidelity_level", 3))
+
+        self.idle_aware = bool(config.get("idle_aware_cpu_budget", True))
+        self.idle_cpu_multiplier_cap = float(
+            config.get(
+                "idle_cpu_multiplier_cap",
+                max(1.0, float((os.cpu_count() or 2) - 1)),
+            )
+        )
 
         self.upgrade_improvement_threshold = float(
             config.get("upgrade_if_improvement_pct", 0.05)
@@ -161,10 +184,41 @@ class OrganicBudget:
         kb = level["memory_per_body_kb"] * self.body_count
         return kb / 1024.0
 
+    def _idle_headroom_multiplier(self) -> float:
+        """
+        How far above the floor cap this process may currently spend,
+        based on how idle the REST of the machine is right now.
+
+        psutil.cpu_percent(interval=None) is non-blocking and reports
+        the delta since the last call -- exactly the usage pattern for
+        a value sampled once per frame in a tight loop, not something
+        needing its own timer. system_busy_pct already includes this
+        process's own usage, so idle_fraction reflects what everything
+        ELSE on the machine is doing: at 0% other usage, the multiplier
+        approaches idle_cpu_multiplier_cap (n-1 cores' worth); at 100%,
+        it collapses back to 1.0x, the floor.
+        """
+        if not self.idle_aware or psutil is None:
+            return 1.0
+
+        try:
+            system_busy_pct = psutil.cpu_percent(interval=None)
+        except Exception:
+            return 1.0
+
+        idle_fraction = max(0.0, min(1.0, 1.0 - system_busy_pct / 100.0))
+        multiplier = 1.0 + idle_fraction * (self.idle_cpu_multiplier_cap - 1.0)
+
+        return max(1.0, min(multiplier, self.idle_cpu_multiplier_cap))
+
+    def effective_cpu_cap_ms(self) -> float:
+        return self.max_cpu_ms_per_frame * self._idle_headroom_multiplier()
+
     def cpu_headroom_pct(self) -> float:
-        if self.max_cpu_ms_per_frame <= 0:
+        cap = self.effective_cpu_cap_ms()
+        if cap <= 0:
             return 0.0
-        return 1.0 - (self.last_cpu_ms / self.max_cpu_ms_per_frame)
+        return 1.0 - (self.last_cpu_ms / cap)
 
     def memory_headroom_pct(self) -> float:
         if self.max_memory_mb <= 0:
@@ -256,13 +310,14 @@ class OrganicBudget:
             return report
 
         projected_cpu, projected_mem = self._projected_cost(next_level)
+        effective_cap = self.effective_cpu_cap_ms()
 
-        if projected_cpu > self.max_cpu_ms_per_frame:
+        if projected_cpu > effective_cap:
             self.upgrades_denied += 1
             report["reason"] = (
                 f"CPU budget insufficient "
                 f"({projected_cpu:.1f}ms projected > "
-                f"{self.max_cpu_ms_per_frame:.1f}ms cap)"
+                f"{effective_cap:.1f}ms cap)"
             )
             self.last_report = report
             return report
@@ -292,11 +347,14 @@ class OrganicBudget:
 
     def state(self) -> dict[str, Any]:
         level = FIDELITY_LEVELS[self.fidelity_level]
+        multiplier = self._idle_headroom_multiplier()
         return {
             "fidelity_level": self.fidelity_level,
             "fidelity_name": level["name"],
             "cpu_ms": self.last_cpu_ms,
-            "cpu_cap_ms": self.max_cpu_ms_per_frame,
+            "cpu_cap_ms": self.max_cpu_ms_per_frame * multiplier,
+            "cpu_cap_floor_ms": self.max_cpu_ms_per_frame,
+            "cpu_idle_multiplier": multiplier,
             "memory_mb": self.last_memory_mb,
             "memory_cap_mb": self.max_memory_mb,
             "upgrades_granted": self.upgrades_granted,
