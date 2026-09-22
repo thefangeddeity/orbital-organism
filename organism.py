@@ -208,9 +208,26 @@ def main():
     PANEL_TOP = 0.93
     PANEL_HEIGHT = PANEL_TOP - PANEL_BOTTOM
 
+    # BOTTOM_PANEL_HEIGHT carves out a strip for the brain-transplant
+    # experiment's own result plot (a separate, standalone sibling
+    # project -- see BRAIN_TRANSPLANT_RESULTS_DIR below -- not part of
+    # this organism's own process) -- ONLY below the centre 3-D
+    # simulation panel, not the two side dashboards, which keep their
+    # original full height unchanged. Static content, drawn once after
+    # setup rather than every frame: unlike the three panels above,
+    # nothing here changes without a fresh dispatch run.
+    BOTTOM_PANEL_HEIGHT = 0.20
+    CENTER_PANEL_BOTTOM = PANEL_BOTTOM + BOTTOM_PANEL_HEIGHT
+    CENTER_PANEL_HEIGHT = PANEL_TOP - CENTER_PANEL_BOTTOM
+
     dashboard_ax = fig.add_axes([0.015, PANEL_BOTTOM, 0.185, PANEL_HEIGHT])
-    ax = fig.add_axes([0.21, PANEL_BOTTOM, 0.56, PANEL_HEIGHT], projection="3d")
+    ax = fig.add_axes(
+        [0.21, CENTER_PANEL_BOTTOM, 0.56, CENTER_PANEL_HEIGHT], projection="3d",
+    )
     right_ax = fig.add_axes([0.80, PANEL_BOTTOM, 0.18, PANEL_HEIGHT])
+    bottom_ax = fig.add_axes(
+        [0.21, PANEL_BOTTOM, 0.56, BOTTOM_PANEL_HEIGHT - 0.03],
+    )
 
     PHOSPHOR = (0.0, 0.85, 1.0)
 
@@ -1004,6 +1021,14 @@ def main():
             provider = providers.get(name)
             if provider is None:
                 continue
+            # "enabled": false hides a provider from the display
+            # entirely, not just marks it offline -- Ariana isn't
+            # coming back online soon, and an OFFLINE row it can't act
+            # on is just noise. organism.json's own value, not
+            # hardcoded here, so re-enabling it later is a config
+            # change, not a code change.
+            if not bool(provider_caps.get(name, {}).get("enabled", True)):
+                continue
             cap = float(provider_caps.get(name, {}).get("resource_cap_pct", 100))
             y = _render_extension(provider, y - GAP_SECTION, cap)
 
@@ -1012,6 +1037,110 @@ def main():
         # in the 0-1 space the rest of this function assumes.
         right_ax.set_xlim(0, 1)
         right_ax.set_ylim(0, 1)
+
+    # A separate, standalone sibling project (../../../brain-transplant,
+    # a peer of orbital-sandbox under Projects/repos/), never run inside
+    # this process -- reads whatever the latest dispatched result there
+    # happens to be, same read-only "window onto a file another process
+    # wrote" shape as world_textures.json or scratch_history.json.
+    # Drawn ONCE here, not inside the animation loop below: nothing here
+    # changes without a fresh dispatch_brain_transplant.py run, so there
+    # is nothing to redraw every frame.
+    BRAIN_TRANSPLANT_RESULTS_DIR = (
+        Path(__file__).resolve().parents[3] / "brain-transplant" / "results"
+    )
+
+    def _render_brain_transplant_panel():
+        bottom_ax.set_facecolor(NAVY_BG)
+        for spine in bottom_ax.spines.values():
+            spine.set_color((*PHOSPHOR, 0.4))
+        bottom_ax.tick_params(colors=(*PHOSPHOR, 0.6), labelsize=FS_CAPTION)
+        bottom_ax.grid(color=(*PHOSPHOR, 0.10))
+
+        results = (
+            sorted(BRAIN_TRANSPLANT_RESULTS_DIR.glob("brain_transplant-*.json"))
+            if BRAIN_TRANSPLANT_RESULTS_DIR.exists() else []
+        )
+
+        if not results:
+            bottom_ax.text(
+                0.5, 0.5,
+                "BRAIN TRANSPLANT: no result yet -- run "
+                "brain-transplant/tools/dispatch_brain_transplant.py",
+                color=(*PHOSPHOR, 0.5), fontsize=FS_BODY,
+                ha="center", va="center", transform=bottom_ax.transAxes,
+            )
+            return
+
+        try:
+            data = json.loads(results[-1].read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            bottom_ax.text(
+                0.5, 0.5, "BRAIN TRANSPLANT: latest result unreadable",
+                color=(*PHOSPHOR, 0.5), fontsize=FS_BODY,
+                ha="center", va="center", transform=bottom_ax.transAxes,
+            )
+            return
+
+        ref = data.get("reference_shot", {})
+        ground_truth = ref.get("ground_truth_xy_km", [])
+        predicted_raw = ref.get("predicted_xy_km", [])
+
+        if ground_truth:
+            gt_x = [p[0] for p in ground_truth]
+            gt_y = [p[1] for p in ground_truth]
+            bottom_ax.plot(
+                gt_x, gt_y, color=PHOSPHOR, linewidth=1.5,
+                label="ground truth (real physics)",
+            )
+
+            # Same divergence-truncation reasoning as the standalone
+            # visualize_result.py: stop at the first point that's
+            # already many times the real trajectory's own scale, not
+            # just at the first NaN -- an intermediate 1e93 point one
+            # step before overflow is exactly as diverged as the inf
+            # itself and would blow out these axes just the same.
+            reference_scale = max(
+                (abs(v) for p in ground_truth for v in p), default=1.0
+            )
+            limit = max(reference_scale, 1.0) * 50.0
+            predicted_finite = []
+            for x, y in predicted_raw:
+                if not (math.isfinite(x) and math.isfinite(y)):
+                    break
+                if abs(x) > limit or abs(y) > limit:
+                    break
+                predicted_finite.append((x, y))
+
+            if predicted_finite:
+                px = [p[0] for p in predicted_finite]
+                py = [p[1] for p in predicted_finite]
+                bottom_ax.plot(
+                    px, py, color=(1.0, 0.65, 0.15), linewidth=1.2,
+                    linestyle="--",
+                    label=(
+                        "network rollout "
+                        f"(diverges @ step {len(predicted_finite)})"
+                    ),
+                )
+
+        bottom_ax.set_title(
+            f"BRAIN TRANSPLANT -- {data.get('domain', '?')}  "
+            f"(loss: {data.get('baseline_validation_loss', 0):.2g} -> "
+            f"{data.get('trained_validation_loss', 0):.2g} -> "
+            f"{data.get('final_validation_loss', 0):.2g}, "
+            f"{data.get('self_evolve_accepted', 0)}/"
+            f"{data.get('self_evolve_cycles', 0)} evolved)",
+            color=PHOSPHOR, fontsize=FS_SUBHEAD, loc="left",
+        )
+        bottom_ax.legend(
+            facecolor=NAVY_BG, edgecolor=(*PHOSPHOR, 0.3),
+            labelcolor=PHOSPHOR, fontsize=FS_CAPTION, loc="upper right",
+        )
+        bottom_ax.set_xlabel("downrange, km", color=PHOSPHOR, fontsize=FS_CAPTION)
+        bottom_ax.set_ylabel("altitude, km", color=PHOSPHOR, fontsize=FS_CAPTION)
+
+    _render_brain_transplant_panel()
 
     last = time.perf_counter()
     organism_born = time.perf_counter()

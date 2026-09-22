@@ -80,7 +80,8 @@
         },
 
         "ariana": {
-            "enabled": true,
+            "enabled": false,
+            "_disabled_note": "Not available any time soon (2026-09-22) -- hidden from the dashboard entirely, not just marked offline. Flip back to true to bring it back.",
             "address": null,
             "role": "opportunistic booster + archival",
             "intermittent": true,
