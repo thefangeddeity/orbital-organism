@@ -360,6 +360,18 @@ def main():
         )
 
     last = time.perf_counter()
+    organism_born = time.perf_counter()
+    last_status_print = 0.0
+
+    def _format_age(seconds):
+        seconds = int(seconds)
+        h, remainder = divmod(seconds, 3600)
+        m, s = divmod(remainder, 60)
+        if h:
+            return f"{h}h {m:02d}m {s:02d}s"
+        if m:
+            return f"{m}m {s:02d}s"
+        return f"{s}s"
 
     try:
 
@@ -724,9 +736,12 @@ def main():
             else:
                 learning_state = "READY"
 
+            age_seconds = now - organism_born
+
             lines = [
                 "ORGANISM",
                 "",
+                f"age: {_format_age(age_seconds)}",
                 "architecture: MODULAR",
                 f"learning: {learning_state}",
                 "",
@@ -891,11 +906,17 @@ def main():
                 print(f"[Organism] fidelity check ({verb}) -> {upgrade_report['reason']}")
 
             tick_count += 1
-            if tick_count % 10 == 0:
-                status = f"[Organism] Tick {tick_count}"
+
+            # Wall-clock cadence, not tick count -- ticks are a render-
+            # loop implementation detail, not a unit anyone watching
+            # this organism actually feels. Age is.
+            if age_seconds - last_status_print >= 2.0:
+                last_status_print = age_seconds
+                status = f"[Organism] age={_format_age(age_seconds)}"
                 if learner is not None:
                     status += (
                         f"  loss={learner.validation_loss:.3e}"
+                        f"  steps={learner.training_steps:,}"
                         f"  gen={learner.evolution_runs}"
                         f"  L{budget.fidelity_level}"
                     )
