@@ -684,8 +684,12 @@ def main():
         grid_top = y_top - 0.042
         grid_left = 0.05
         cell_w = 0.90 / len(LOSS_ORDER)
-        cell_h = 0.036
-        gap = 0.006
+        # Sized so the third extension (Ariana) still fits inside the
+        # panel -- at 0.036 its role line overflowed past the bottom
+        # bracket. The grid reads fine at this size; a machine falling
+        # off the panel entirely does not.
+        cell_h = 0.025
+        gap = 0.005
 
         for col, loss_name in enumerate(LOSS_ORDER):
             for row, activation_name in enumerate(ACTIVATION_ORDER):
