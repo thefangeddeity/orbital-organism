@@ -270,7 +270,7 @@ def adopt_if_better(result: dict, baseline: float, payload: dict) -> dict:
 def deploy_code() -> None:
     _run(["ssh", REMOTE_HOST, f"mkdir -p {REMOTE_DIR}"])
 
-    for name in ("neural_learner.py", "lego.py", "loss_blocks.py"):
+    for name in ("neural_learner.py", "lego.py", "loss_blocks.py", "scratch_blocks.py"):
         result = _run([
             "scp", str(MODULES_DIR / name),
             f"{REMOTE_HOST}:{REMOTE_DIR}/{name}",
@@ -325,8 +325,70 @@ def dispatch(task: str, payload: dict | None = None) -> dict:
     return json.loads(run_result.stdout)
 
 
-def main():
-    task = sys.argv[1] if len(sys.argv) > 1 else "explore_mutation_space"
+TEXTURE_RESOLUTION = 96
+TEXTURE_OCTAVES = 5
+WORLD_TEXTURES_PATH = STATE_DIR / "world_textures.json"
+
+
+def _stable_seed(name: str) -> int:
+    # NOT Python's builtin hash() -- that's randomized per-process
+    # (PYTHONHASHSEED) unless explicitly disabled, so the same body
+    # name would get a different seed on every single dispatch run,
+    # regenerating a completely different random surface each time
+    # instead of a stable one. hashlib is deterministic across
+    # processes and runs.
+    import hashlib
+
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
+    return int(digest[:8], 16)
+
+
+def build_texture_payload() -> dict:
+    """
+    Body list for generate_world_textures: just names and a seed
+    derived stably from each name, so re-dispatching regenerates the
+    SAME surface per body (useful while iterating on the renderer) --
+    not a fresh random one every run.
+
+    Reads organism.json's actual configured world.mode and builds
+    through real_systems.build_world(), same as organism.py's own
+    main() does -- NOT hardcoded to the solar system the way
+    generate_samples() above still is. The renderer's world-building
+    has to track whatever the model is actually running against: if
+    world.mode ever switches to proxima or alpha_centauri (real_systems
+    .py already supports both, live-data-synced for proxima), textures
+    should generate for THOSE bodies, not silently stay stuck on the
+    solar system's Mercury-through-Neptune.
+    """
+    import importlib.util
+
+    from real_systems import build_world
+
+    sim_path = ORGANISM_DIR.parents[1] / "orbital-sandbox.py"
+    spec = importlib.util.spec_from_file_location("sim", sim_path)
+    sim = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sim)
+
+    config_path = ORGANISM_DIR / "organism.json"
+    config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    world_mode = config.get("world", {}).get("mode", "solar_system")
+    world = build_world(sim, world_mode)
+
+    bodies = [{"name": world.SUN.name, "seed": _stable_seed(world.SUN.name)}]
+    for body in world.PLANETS:
+        bodies.append({"name": body.name, "seed": _stable_seed(body.name)})
+
+    return {
+        "task": "generate_world_textures",
+        "world_mode": world_mode,
+        "bodies": bodies,
+        "resolution": TEXTURE_RESOLUTION,
+        "octaves": TEXTURE_OCTAVES,
+    }
+
+
+def _run_explore_mutation_space() -> None:
+    task = "explore_mutation_space"
 
     print(f"Dispatching '{task}' to {REMOTE_HOST}...")
     started = time.perf_counter()
@@ -371,6 +433,59 @@ def main():
             )
         else:
             print(f"Not adopted: {adoption['reason']}")
+
+
+def _run_generate_world_textures() -> None:
+    task = "generate_world_textures"
+
+    print(f"Dispatching '{task}' to {REMOTE_HOST}...")
+    started = time.perf_counter()
+
+    payload = build_texture_payload()
+    result = dispatch(task, payload=payload)
+
+    elapsed = time.perf_counter() - started
+    print(f"Done in {elapsed:.1f}s.")
+
+    results_dir = STATE_DIR / "tanzania_results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    out_path = results_dir / f"{task}-{timestamp}.json"
+    out_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+
+    print(f"Result written to {out_path}")
+
+    # Materialized to a STABLE path (not just the timestamped archive
+    # above) -- this is what organism.py's renderer actually reads.
+    # Same atomic tmp-then-replace pattern as every other piece of
+    # cross-process state in this project.
+    temp = WORLD_TEXTURES_PATH.with_suffix(".tmp")
+    temp.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    temp.replace(WORLD_TEXTURES_PATH)
+
+    print(f"Materialized to {WORLD_TEXTURES_PATH}")
+    print(f"bodies textured: {len(result.get('textures', {}))}, "
+          f"resolution: {result.get('resolution')}, "
+          f"octaves: {result.get('octaves')}")
+    print("Picked up on the organism's next fidelity-eligible render.")
+
+
+DISPATCH_MAIN = {
+    "explore_mutation_space": _run_explore_mutation_space,
+    "generate_world_textures": _run_generate_world_textures,
+}
+
+
+def main():
+    task = sys.argv[1] if len(sys.argv) > 1 else "explore_mutation_space"
+
+    runner = DISPATCH_MAIN.get(task)
+    if runner is None:
+        print(f"Unknown task '{task}'. Known tasks: {', '.join(DISPATCH_MAIN)}")
+        sys.exit(1)
+
+    runner()
 
 
 if __name__ == "__main__":

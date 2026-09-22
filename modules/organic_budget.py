@@ -39,17 +39,30 @@ FIDELITY_LEVELS = {
     },
     2: {
         "name": "textured",
-        "description": "UV-mapped surface texture on spheres.",
-        "memory_per_body_kb": 512,
+        "description": (
+            "Procedurally-generated surface noise, tinted per-face onto "
+            "the sphere (dispatch_tanzania.py's generate_world_textures)."
+        ),
+        # Real measured size, not a placeholder guess: a cached 96x96
+        # float64 heightmap is ~72KB, plus a small resampled-to-mesh-
+        # resolution copy. Corrected from an earlier 512KB estimate
+        # written before any real texture existed to measure.
+        "memory_per_body_kb": 75,
         "compute_factor": 5.0,
-        "implemented": False,
+        "implemented": True,
     },
     3: {
         "name": "cratered",
-        "description": "Procedural surface relief (craters, terrain).",
-        "memory_per_body_kb": 2048,
+        "description": (
+            "Same cached heightmap as L2, but displacing the mesh "
+            "itself -- real geometric bumps, not just tinted faces."
+        ),
+        # Shares L2's cached heightmap (no separate texture is
+        # generated for L3); the only extra cost is one more resampled-
+        # at-a-finer-resolution copy, hence only modestly above L2's.
+        "memory_per_body_kb": 80,
         "compute_factor": 9.0,
-        "implemented": False,
+        "implemented": True,
     },
 }
 

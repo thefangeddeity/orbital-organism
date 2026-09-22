@@ -177,8 +177,104 @@ def run_explore_mutation_space(payload: dict) -> dict:
     }
 
 
+# ======================================================================
+# WORLD-BUILDING: procedural surface textures for L2/L3 fidelity.
+#
+# Multi-octave VALUE noise (bilinear-upsampled random grids, summed
+# across octaves at doubling frequency) -- not Perlin/simplex, which
+# would need an extra dependency neither side of this dispatch has
+# installed. This is a real, deterministic (given a seed), genuinely
+# more-expensive-at-higher-resolution computation -- the actual reason
+# it's worth affording here rather than computing inline at boot: it
+# runs once per body, gets cached, and the render loop never touches
+# it again.
+# ======================================================================
+
+TEXTURE_RESOLUTION = 96
+TEXTURE_OCTAVES = 5
+
+
+def _value_noise_2d(
+    rng: np.random.Generator, shape: tuple, octaves: int, persistence: float = 0.5
+) -> np.ndarray:
+    height, width = shape
+    total = np.zeros(shape)
+    amplitude = 1.0
+    max_amplitude = 0.0
+    freq = 4
+
+    for _ in range(octaves):
+        grid_h, grid_w = max(2, freq), max(2, freq)
+        grid = rng.uniform(-1.0, 1.0, size=(grid_h, grid_w))
+
+        ys = np.linspace(0, grid_h - 1, height)
+        xs = np.linspace(0, grid_w - 1, width)
+        y0 = np.floor(ys).astype(int)
+        y1 = np.clip(y0 + 1, 0, grid_h - 1)
+        x0 = np.floor(xs).astype(int)
+        x1 = np.clip(x0 + 1, 0, grid_w - 1)
+        wy = (ys - y0)[:, None]
+        wx = (xs - x0)[None, :]
+
+        top = grid[y0][:, x0] * (1 - wx) + grid[y0][:, x1] * wx
+        bottom = grid[y1][:, x0] * (1 - wx) + grid[y1][:, x1] * wx
+        layer = top * (1 - wy) + bottom * wy
+
+        total += amplitude * layer
+        max_amplitude += amplitude
+        amplitude *= persistence
+        freq *= 2
+
+    return total / max_amplitude
+
+
+def run_generate_world_textures(payload: dict) -> dict:
+    """
+    One procedural heightmap per body -- normalized to [-1, 1], meant
+    to drive BOTH a facecolor tint (L2: mix the body's base color with
+    a shade offset from the heightmap) and real mesh displacement
+    (L3: perturb each vertex's radius by the same heightmap), so both
+    fidelity levels read as textured/cratered views of the SAME
+    generated surface, not two unrelated effects.
+
+    Resolution/octaves are generous relative to what would be sane to
+    block the organism's own boot on locally (see TEXTURE_RESOLUTION/
+    TEXTURE_OCTAVES) -- this is the actual justification for dispatching
+    world-building here at all: not because it's needed live, but
+    because it's a one-time cost worth spending real compute on.
+    """
+    bodies = payload.get("bodies", [])
+    resolution = int(payload.get("resolution", TEXTURE_RESOLUTION))
+    octaves = int(payload.get("octaves", TEXTURE_OCTAVES))
+
+    textures = {}
+    for body in bodies:
+        name = body["name"]
+        seed = int(body.get("seed", abs(hash(name)) % (2**32)))
+        rng = np.random.default_rng(seed)
+        heightmap = _value_noise_2d(rng, (resolution, resolution), octaves)
+        textures[name] = {
+            "resolution": resolution,
+            "heightmap": heightmap.tolist(),
+        }
+
+    return {
+        "task": "generate_world_textures",
+        # Echoed straight through, not re-derived -- the renderer that
+        # eventually reads this cache needs to know which world it was
+        # generated for, to refuse a stale/mismatched cache rather than
+        # silently applying solar-system textures to a proxima world
+        # (or vice versa) after a world.mode switch.
+        "world_mode": payload.get("world_mode"),
+        "resolution": resolution,
+        "octaves": octaves,
+        "textures": textures,
+    }
+
+
 TASKS = {
     "explore_mutation_space": run_explore_mutation_space,
+    "generate_world_textures": run_generate_world_textures,
 }
 
 

@@ -487,6 +487,109 @@ def main():
         "Neptune": "#3D5FE0",
     }
 
+    # Sphere mesh resolution per fidelity level -- L2/L3 use a finer
+    # grid than L1's coarse 10x10, since textured/displaced detail
+    # needs more vertices to actually read as detail rather than a
+    # blurry wash. This is also what makes L2/L3 genuinely cost more
+    # per frame (plot_surface's cost scales with vertex count), which
+    # is exactly what OrganicBudget's compute_factor already models --
+    # the render cost backing that number is now real, not assumed.
+    MESH_RESOLUTION = {1: 10, 2: 24, 3: 40}
+
+    def _hex_to_rgb(hex_color: str) -> np.ndarray:
+        hex_color = hex_color.lstrip("#")
+        return np.array(
+            [int(hex_color[i:i + 2], 16) / 255.0 for i in (0, 2, 4)]
+        )
+
+    def _load_world_textures(mode: str) -> dict:
+        """
+        Loaded once at boot, not per-frame -- state/world_textures.json
+        (written by tools/dispatch_tanzania.py's generate_world_textures
+        task) holds a 96x96 float heightmap per body, and re-parsing
+        that much JSON every frame would be real, avoidable overhead
+        for data that never changes during the process's life.
+
+        Refuses a cache generated for a DIFFERENT world_mode outright,
+        rather than silently applying, say, solar-system textures to a
+        proxima world after a config switch -- same reasoning as
+        real_systems.py's per-planet live/fallback split: a mismatch is
+        reported, never papered over. Returns {} (every body falls back
+        to flat L1 color) on any mismatch, missing file, or parse error.
+        """
+        path = Path(__file__).resolve().parent / "state" / "world_textures.json"
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if data.get("world_mode") != mode:
+            return {}
+        return {
+            name: np.asarray(tex["heightmap"], dtype=float)
+            for name, tex in data.get("textures", {}).items()
+        }
+
+    world_textures = _load_world_textures(world_mode)
+    _resampled_heightmap_cache: dict = {}
+
+    def _resampled_heightmap(name: str, resolution: int):
+        heightmap = world_textures.get(name)
+        if heightmap is None:
+            return None
+
+        cache_key = (name, resolution)
+        if cache_key in _resampled_heightmap_cache:
+            return _resampled_heightmap_cache[cache_key]
+
+        h, w = heightmap.shape
+        if h == resolution and w == resolution:
+            resampled = heightmap
+        else:
+            ys = np.linspace(0, h - 1, resolution)
+            xs = np.linspace(0, w - 1, resolution)
+            y0 = np.floor(ys).astype(int)
+            y1 = np.clip(y0 + 1, 0, h - 1)
+            x0 = np.floor(xs).astype(int)
+            x1 = np.clip(x0 + 1, 0, w - 1)
+            wy = (ys - y0)[:, None]
+            wx = (xs - x0)[None, :]
+            top = heightmap[y0][:, x0] * (1 - wx) + heightmap[y0][:, x1] * wx
+            bottom = heightmap[y1][:, x0] * (1 - wx) + heightmap[y1][:, x1] * wx
+            resampled = top * (1 - wy) + bottom * wy
+
+        _resampled_heightmap_cache[cache_key] = resampled
+        return resampled
+
+    def _texture_facecolors(heightmap, base_hex: str, tint_strength: float = 0.35):
+        # One color per FACE (a plot_surface quad), not per vertex --
+        # matplotlib's facecolors wants shape (rows-1, cols-1, 4) for
+        # an (rows, cols) vertex grid, so each face gets the average of
+        # its 4 corner heights.
+        base = _hex_to_rgb(base_hex)
+        face_height = 0.25 * (
+            heightmap[:-1, :-1] + heightmap[1:, :-1]
+            + heightmap[:-1, 1:] + heightmap[1:, 1:]
+        )
+        shade = 1.0 + tint_strength * face_height
+        rgb = np.clip(base[None, None, :] * shade[:, :, None], 0.0, 1.0)
+        alpha = np.ones((*rgb.shape[:2], 1))
+        return np.concatenate([rgb, alpha], axis=-1)
+
+    def _displaced_sphere_mesh(cx, cy, cz, radius, heightmap, resolution, strength=0.12):
+        # Real geometric displacement (each vertex's own radius
+        # perturbed by the heightmap), not just shading -- this is what
+        # makes L3 "cratered" rather than merely L2's textured-but-flat
+        # sphere with a bumpier-looking paint job.
+        u = np.linspace(0, 2 * np.pi, resolution)
+        v = np.linspace(0, np.pi, resolution)
+        r = radius * (1.0 + strength * heightmap)
+        xs = cx + r * np.outer(np.cos(u), np.sin(v))
+        ys = cy + r * np.outer(np.sin(u), np.sin(v))
+        zs = cz + r * np.outer(np.ones_like(u), np.cos(v))
+        return xs, ys, zs
+
     def _apply_dark_theme(ax):
         # ax.clear() resets these every frame, so this must be re-applied
         # every frame too -- not just once at setup.
@@ -1110,20 +1213,54 @@ def main():
             # learning progress and machine budget both justify it.
             # ----------------------------------------------------------
 
+            def _render_body_surface(name, cx, cy, cz, radius_au):
+                # L1: flat color, coarse mesh (unchanged behavior). L2:
+                # finer mesh + per-face color tinted by the body's
+                # cached heightmap (state/world_textures.json, from
+                # tools/dispatch_tanzania.py's generate_world_textures).
+                # L3: same texture, but the mesh itself is displaced by
+                # it -- real bumps, not just paint. A body with no
+                # cached texture yet (never dispatched, or dispatched
+                # for a different world_mode) falls back to flat L1
+                # rendering for just that body rather than faking detail
+                # -- same per-body-honest-fallback shape as
+                # real_systems.py's live/literature split.
+                level = budget.fidelity_level
+                resolution = MESH_RESOLUTION.get(level, 10)
+                base_hex = BODY_COLORS.get(name, "#AAAAAA")
+                heightmap = (
+                    _resampled_heightmap(name, resolution) if level >= 2 else None
+                )
+
+                if level >= 3 and heightmap is not None:
+                    xs, ys, zs = _displaced_sphere_mesh(
+                        cx, cy, cz, radius_au, heightmap, resolution,
+                    )
+                else:
+                    xs, ys, zs = _sphere_mesh(
+                        cx, cy, cz, radius_au, resolution=resolution,
+                    )
+
+                if level >= 2 and heightmap is not None:
+                    ax.plot_surface(
+                        xs, ys, zs,
+                        facecolors=_texture_facecolors(heightmap, base_hex),
+                        linewidth=0,
+                        antialiased=False,
+                        shade=False,
+                    )
+                else:
+                    ax.plot_surface(
+                        xs, ys, zs,
+                        color=base_hex,
+                        linewidth=0,
+                        antialiased=False,
+                    )
+
             if budget.fidelity_level >= 1:
 
                 sun_radius_au = _visual_radius_au(world.SUN.radius)
-
-                sxs, sys_, szs = _sphere_mesh(
-                    0.0, 0.0, 0.0, sun_radius_au,
-                )
-
-                ax.plot_surface(
-                    sxs, sys_, szs,
-                    color=BODY_COLORS["Sun"],
-                    linewidth=0,
-                    antialiased=False,
-                )
+                _render_body_surface("Sun", 0.0, 0.0, 0.0, sun_radius_au)
 
                 body_by_name = {
                     body.name: body
@@ -1139,16 +1276,7 @@ def main():
                         body.radius if body is not None else 6371.0
                     )
 
-                    pxs, pys, pzs = _sphere_mesh(
-                        x, y, z, radius_au,
-                    )
-
-                    ax.plot_surface(
-                        pxs, pys, pzs,
-                        color=BODY_COLORS.get(name, "#AAAAAA"),
-                        linewidth=0,
-                        antialiased=False,
-                    )
+                    _render_body_surface(name, x, y, z, radius_au)
 
                     label = ax.text(
                         x + 0.035,
